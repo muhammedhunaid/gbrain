@@ -80,6 +80,23 @@ export interface GBrainConfig {
    * those are different stores). Edit `~/.gbrain/config.json` directly.
    * All fields default to ON — capture and scrubbing both opt-out.
    */
+  /**
+   * v0.41 — autopilot daemon configuration. Currently houses the nightly
+   * quality probe feature flag (default OFF — opt-in to protect API spend
+   * on fresh installs). Flag is gated INSIDE the autopilot tick body;
+   * absence means "do not run nightly probe."
+   */
+  autopilot?: {
+    nightly_quality_probe?: {
+      /** Enable the nightly probe in the autopilot loop. Defaults to false. */
+      enabled?: boolean;
+      /**
+       * Cost cap (USD) per probe invocation. Defaults to 5.
+       * Worst case: 5 × 30 nights ≈ $150/month per brain.
+       */
+      max_usd?: number;
+    };
+  };
   eval?: {
     /** false disables capture entirely. Defaults to true. */
     capture?: boolean;

@@ -170,12 +170,17 @@ signal. Plan file: `~/.claude/plans/system-instruction-you-are-working-dazzling-
 Three strategic decisions landed and the 7 verified-absent items the
 analysis surfaced were approved for filing.
 
-### D1 — v0.41 Eval-loop wave (NEXT, P0)
+### D1 — v0.41 Eval-loop wave (LANDED v0.41.0.0, scope reshaped)
 
-The eval/quality-gate cluster has all the substrate (eval_candidates table,
-`eval export/replay`, cross-modal runner, nightly probe, audit JSONL) but
-the LOOP is barely live. Three blocking moves turn "gbrain has eval infra"
-into "gbrain is self-improving."
+**Status:** Shipped in v0.41.0.0 (2026-05-24). CEO+Eng review reshaped the
+original 3-item slice: items 1 + 3 (autopilot wiring + `gbrain eval gate`)
+shipped as planned + EXPANDED with a correctness gate (qrels-based recall@K
++ first-relevant-hit-rate) and a `gbrain bench publish` verb that closes the
+LOOP by giving captured data a destination. Item 2 (capture-default flip)
+deferred to v0.42 because the flip is a one-way door and shouldn't ship
+before the destination exists.
+
+The original 3 items as filed (kept for traceability):
 
 - [ ] **P0 — `gbrain eval gate <baseline.ndjson>` for CI.** The single most
   load-bearing missing item across all 12 clusters. Fails the build on
@@ -319,6 +324,48 @@ cleanup can move each into the relevant area section.
   doesn't. (Embedding cluster.)
 
 ---
+## v0.41 Eval-loop wave follow-ups (v0.42+)
+
+Filed during v0.41 CEO + Eng review (D11-D13). All three landed via codex
+outside-voice triage on the reshaped plan.
+
+- [ ] **v0.42 P1: capture-default flip + scrubber hardening.** Flip
+  `eval.capture` default from OFF to ON. Harden `src/core/eval-capture-scrub.ts`
+  with AWS access key (`AKIA[0-9A-Z]{16}`), GitHub PAT (`ghp_[A-Za-z0-9]{36}`),
+  and generic API-key-suffix patterns. Add first-run stderr banner with
+  `gbrain eval capture off` opt-out hint and persistent
+  `eval.capture_acknowledged` config flag (banner fires once per acked-false).
+  Two new CLI verbs: `gbrain eval capture on|off|status` + `acknowledge`.
+  Dependency: v0.41 LOOP (this wave) has shipped + been used for at least
+  a month so the destination story is real. Filed during v0.41 CEO review
+  per D11 after the original wave plan was reshaped by codex outside-voice
+  to defer this item.
+
+- [ ] **v0.42-v0.43 P2: `gbrain bench publish --suggest-thresholds`.**
+  Reads the last 30 days of `eval gate` JSON outputs (from gbrain-evals
+  CI artifacts or `~/.gbrain/audit/bench-publish-*.jsonl`), computes p10
+  of each metric across passes, suggests those as thresholds. Starting-
+  guess thresholds in v0.41 (regression: jaccard 0.85 / top1 0.80 /
+  latency_multiplier 2.0; correctness: recall@10 0.70 /
+  first_relevant_hit_rate 0.60 / expected_top1 0.50) are either too tight
+  or too loose; data informs the heuristic. Dependency: 30+ days of gate
+  runs accumulating. Filed during v0.41 CEO review per D12.
+
+- [ ] **v0.42+ P3: `gbrain bench diff` + `gbrain bench list`.**
+  `bench diff <a.baseline.ndjson> <b.baseline.ndjson>` — visual diff of
+  two baselines showing which queries changed top-1 retrieval, which
+  lost relevant_slugs, which gained. `bench list [--dir <path>]` — lists
+  baselines with metadata (label, published_at, row_count, source_hash);
+  defaults to `~/.gbrain/baselines/` + `gbrain-evals/baselines/` if both
+  exist. Trivial; ship when there's >1 baseline to look at. Filed during
+  v0.41 CEO review per D13.
+
+- [ ] **v0.42+: ship the coordinated `gbrain-evals/baselines/v0.41-launch.baseline.ndjson`
+  + `gbrain-evals/qrels/v0.41-launch.qrels.json` (hermetic-synthetic per D9).**
+  Generate locally via `gbrain bench publish --from <hermetic-test-corpus>` then
+  commit to the sibling gbrain-evals repo. Gives `gbrain eval gate` a canonical
+  baseline target so users don't have to bootstrap their own immediately.
+
 ## v0.40.7.0 Schema Cathedral v3 follow-ups (v0.40.7+)
 
 These were filed when v0.40.7.0 closed PR #1321's design as a production

@@ -2,6 +2,95 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.41.1.0] - 2026-05-24
+
+**Your CI can now fail a PR when search retrieval gets worse.** Before this release, gbrain shipped the pieces you'd need to measure retrieval quality (capture, replay, nightly probe, cross-modal runner) but nothing connected them into a loop. You could see a quality drop on your screen but nothing automatically caught it. v0.41 closes the loop end-to-end. You publish a baseline once — a snapshot of how your brain performs on a set of real queries — and then `gbrain eval gate` runs against that baseline on every PR. If results get materially worse OR if the brain stops finding pages it used to find, the command exits non-zero and CI turns red. The wave also wires the nightly quality probe into the autopilot daemon (opt-in via config) so a brain you've left running notices its own degradation.
+
+Two ways to fail a gate: a **regression gate** that compares current retrieval to a baseline you captured (catches "did my refactor break search?") and a **correctness gate** that runs your queries against a list of known-right answers (catches "is my search actually any good?"). Most people will start with the regression gate because it's cheaper — `gbrain bench publish` turns your last 200 real queries into a baseline file in a few seconds. The correctness gate (qrels-based, recall@K + first-relevant-hit-rate) is the more honest signal: jaccard alone measures consistency with old retrieval, not correctness, so a better embedding model would FAIL a jaccard-only gate. Both gates are source-id-aware (`source_id::slug` compares) so federated brains can't false-pass via wrong-source hits — the canonical gbrain pitfall closed structurally before it could enter the eval surface.
+
+## To take advantage of v0.41.1.0
+
+`gbrain upgrade` handles the binary update. Then choose one of three paths depending on how you use gbrain:
+
+**Path A — Your own personal regression gate (5 minutes):**
+
+```bash
+# 1. Capture a few hundred real queries (one-time; uses queries already in eval_candidates)
+gbrain eval export --limit 200 --tool query > /tmp/captured.ndjson
+
+# 2. Publish them as a baseline
+mkdir -p ~/.gbrain/baselines
+gbrain bench publish --from /tmp/captured.ndjson --to ~/.gbrain/baselines/personal.baseline.ndjson --label "personal-$(date +%Y%m%d)"
+
+# 3. Gate against it (run this in pre-commit, in CI, or just by hand)
+gbrain eval gate --baseline ~/.gbrain/baselines/personal.baseline.ndjson
+```
+
+Eval capture is OFF by default — set `GBRAIN_CONTRIBUTOR_MODE=1` in your shell or run `gbrain config set eval.capture true` if you want capture to start running (the v0.42 wave flips this default once the privacy hardening lands).
+
+**Path B — Add the qrels correctness gate (more honest signal):**
+
+```bash
+# Use the bundled placeholder fixture or write your own qrels.json
+gbrain eval gate --qrels test/fixtures/eval-baselines/qrels-search.json
+
+# Both gates required (most useful in CI):
+gbrain eval gate --baseline ~/.gbrain/baselines/personal.baseline.ndjson --qrels ~/.gbrain/qrels/personal.qrels.json
+```
+
+The qrels file is a JSON object with `{schema_version: 1, queries: [{query, relevant_slugs, first_relevant_slug}]}`. For multi-source / federated brains, use the explicit shape: `{query, relevant: [{source_id, slug}], expected_top1: {source_id, slug}}`.
+
+**Path C — Let your autopilot run the nightly probe:**
+
+```bash
+# Opt in (default is off — protects API spend on fresh installs)
+gbrain config set autopilot.nightly_quality_probe.enabled true
+gbrain config set autopilot.nightly_quality_probe.max_usd 5
+
+# Next autopilot tick, the probe fires once per 24h and writes an event
+# to ~/.gbrain/audit/quality-probe-YYYY-Www.jsonl. `gbrain doctor` surfaces
+# the outcome.
+```
+
+If any step fails or numbers look wrong, please file an issue with `gbrain doctor` output and `tail -20 ~/.gbrain/audit/bench-publish-*.jsonl` so we can see what the wave's audit trail recorded.
+
+### Itemized changes
+
+**New CLI verbs:**
+- `gbrain bench publish --from <captured.ndjson> --to <X.baseline.ndjson> [--label STRING] [--force] [--threshold-jaccard FLOAT] [--threshold-top1 FLOAT] [--threshold-latency-multiplier FLOAT] [--json]` — turn captured eval rows into a baseline file. Stamps a stable `query_hash` on every row, embeds `_kind: 'baseline_metadata'` discriminator + thresholds + `source_hash` in the first line, sorts rows deterministically. Strict posture: empty input → exit 1; duplicate `(tool_name, source_ids, query_hash)` → exit 1 with first 5 dupes + paste-ready dedup hint; `--to` exists → exit 2 unless `--force`. Audit JSONL at `~/.gbrain/audit/bench-publish-YYYY-Www.jsonl`.
+- `gbrain eval gate [--baseline <X.baseline.ndjson>] [--qrels <Y.qrels.json>] [--threshold-jaccard FLOAT] [--threshold-top1 FLOAT] [--threshold-latency-multiplier FLOAT] [--threshold-recall-at-k FLOAT] [--threshold-first-relevant-hit FLOAT] [--threshold-expected-top1 FLOAT] [-k INT] [--json]` — two-gate dispatch. Regression gate replays baseline queries in-process via `replayCore` (NOT spawn subprocess — avoids gbrain-version-drift for source-tree CI). Correctness gate runs each qrels query via bare `hybridSearch` (deterministic; matches existing eval harness pattern at `src/core/search/eval.ts:242`). Both gates carry source_id through `source_id::slug` compare keys. Verdict requires BOTH to pass when both flags set. Latency math `(baseline + delta) / baseline <= multiplier` (corrected from the original `delta / baseline` shape that would have let 2.5x slowdowns pass at multiplier=2.0). Exit codes: 0 PASS, 1 FAIL (regression OR in-process throw — D3 fail-closed), 2 USAGE.
+
+**New core modules:**
+- `src/core/bench/baseline-file.ts` — single source of truth for the `.baseline.ndjson` file shape. Exports `BaselineMetadata`, `BaselineFile`, `BaselineRow`, `BaselineThresholds` types + pure `parseBaselineFile()` / `serializeBaselineFile()` / `computeSourceHash()` / `normalizeQueryForHash()` / `computeQueryHash()` helpers. Body rows stamped with `schema_version: 1` so existing `eval replay` parser accepts them unchanged. ~190 LOC.
+- `src/core/bench/qrels-file.ts` — pure parser + math for the `.qrels.json` shape. Accepts BOTH the existing fixture shape (slug-only `relevant_slugs` + `first_relevant_slug`, auto-promoted to `source_id='default'`) AND the federated shape (explicit `relevant: [{source_id, slug}]` + `expected_top1`). `computeRecallAtK` / `computeFirstRelevantHit` / `computeExpectedTop1Hit` pure functions; compare keys are `${source_id}::${slug}` strings everywhere. ~210 LOC.
+- `src/core/bench/correctness-gate.ts` — orchestrator that runs every qrels query via bare `hybridSearch` and computes aggregate metrics. Per-query throws recorded as `errored: true` and flagged as a gate failure (any qrels-query exception flips verdict to fail). Injectable `searchFn` test seam. ~140 LOC.
+- `src/core/cycle/nightly-probe-adapters.ts` — bridges the autopilot's object-shape `NightlyProbeDeps` to the existing argv-shape `runEvalLongMemEval` + `runEvalCrossModal` CLI functions. Cross-modal adapter threads `--output summaryPath` explicitly (regression for codex-caught argv bug — without it the summary lands at the default receipt path). In-process invocation (not subprocess) avoids gbrain-version-drift. ~125 LOC.
+
+**Autopilot wiring (opt-in, off by default):**
+- `src/commands/autopilot.ts` — tick body now invokes `runNightlyQualityProbe` when `cfg.autopilot.nightly_quality_probe.enabled === true`. The phase's internal 24h rate-limit (via `shouldRunNightly` reading the audit JSONL) is the single source of truth — no scheduler-side precheck. Probe call wrapped in try/catch that logs to stderr and DOES NOT bump `consecutiveErrors` (probe failure is informational, never crashes the loop). Default `max_usd` cap = 5.
+
+**Modified existing modules:**
+- `src/commands/eval-replay.ts:parseNdjson` — one-line addition: skip lines where `_kind === 'baseline_metadata'`. Without this, the metadata header would be counted as a fake captured row and pollute counts.
+- `src/commands/eval-replay.ts` — new exported `replayCore(engine, opts): Promise<{summary, results}>` programmatic entrypoint. The existing CLI `runEvalReplay` now wraps it. Lets `eval gate` call replay in-process rather than spawning a subprocess. `ReplaySummary` interface also exported so eval-gate can type its envelope.
+- `src/commands/eval.ts` — added `'gate'` to the sub-subcommand dispatch.
+
+**Tests (8 new files, ~65 cases):**
+- `test/bench/baseline-file.test.ts` (9 cases) — round-trip, threshold defaults, source_hash determinism, schema version reject, malformed metadata reject, empty file reject, missing query_hash reject.
+- `test/bench/qrels-file.test.ts` (19 cases) — legacy fixture shape parsing, federated shape with explicit source_id, recall@K math edge cases, multi-source guard via `source_id::slug` compare keys.
+- `test/bench/correctness-gate.test.ts` (6 cases) — per-query iteration, throw-fails-gate (Finding 2D), missing-page-as-miss, empty retrieved → 0, wrong-source-no-credit (eng-D5 regression), expected_top1 denominator math.
+- `test/bench-publish.test.ts` (10 cases) — buildBaselineFromInput happy + edge paths, strict dedupe posture, multi-source NOT a dupe, deterministic serialize, round-trip stability.
+- `test/eval-replay-metadata-skip.test.ts` (2 cases) — IRON-RULE: metadata header skipped from row counts; malformed rows still rejected (validator live).
+- `test/eval-gate.test.ts` (10 cases) — usage errors, baseline-only path, qrels-only path, JSON envelope shape, latency math (corrected formula pinned, OLD formula's bug documented).
+- `test/cycle/nightly-probe-adapters.test.ts` (6 cases) — receipt parsing, missing file throws, malformed JSON throws, argv shape regression (pins `--output`), shape contract pinned.
+- `test/autopilot-nightly-probe-wiring.test.ts` (8 cases) — source-shape regression for the autopilot wiring: feature flag check, NO scheduler-side rate-limit (D10 simplification), try/catch doesn't bump consecutiveErrors, DI shape, in-process via gateway.isAvailable (not subprocess), max_usd default = 5.
+- `test/e2e/eval-loop.test.ts` (4 cases) — full PGLite in-memory LOOP: self-gate passes, perturbed-row gate fails, D3 fail-closed on malformed baseline, byte-stable round-trip.
+
+**v0.42+ follow-ups filed in TODOS.md:**
+- Capture-default flip + scrubber hardening (deferred from this wave per D1 — needs v0.41's destination to ship first).
+- `gbrain bench publish --suggest-thresholds` once 30 days of CI data accumulates.
+- `gbrain bench diff` + `gbrain bench list` companion verbs.
+
+Plan + 13 CEO-review decisions + 10 eng-review decisions + 2 codex outside-voice rounds (15 + 9 findings, all absorbed) at `~/.claude/plans/system-instruction-you-are-working-rustling-peacock.md`. Strategic frame: the v0.41 wave closes the eval LOOP end-to-end so retrieval regressions on master burn a publicly-visible score in BrainBench-Real (sibling `gbrain-evals` repo).
 ## [0.41.0.0] - 2026-05-24
 
 **Your 100-job subagent batch now actually completes.** A real user ran `gbrain jobs work --concurrency 10` against an Azure-hosted Anthropic endpoint, submitted 100 background jobs, and watched every single one dead-letter with `rate lease "anthropic:messages" full (8/8)`. The default cap of 8 starved 2 workers; every starved job got marked as a failure, hit `max_attempts = 3` after 3 lease-full bounces, and dead-lettered. This release turns minions from "a CLI you drive" into "a fleet you supervise" — submit a batch, walk away, come back to completed work.
