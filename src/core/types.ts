@@ -52,6 +52,12 @@ export const ALL_PAGE_TYPES: readonly string[] = [
   // src/core/schema-pack/base/gbrain-base.yaml.
   'conversation', 'atom',
   'code', 'image', 'synthesis',
+  // v0.42 — `extract_receipt` pages record extraction-run outcomes as
+  // first-class brain memory. Slug-prefix `extracts/`. Demoted in search
+  // via DEFAULT_SOURCE_BOOSTS (factor 0.3) and excluded from extraction
+  // loops via the dream_generated:true + type:extract_receipt belt-and-
+  // suspenders pattern per plan D-EXTRACT-19.
+  'extract_receipt',
 ] as const;
 
 /**

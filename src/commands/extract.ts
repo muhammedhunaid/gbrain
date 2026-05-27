@@ -437,6 +437,27 @@ export async function runExtractCore(engine: BrainEngine, opts: ExtractOpts): Pr
 
 export async function runExtract(engine: BrainEngine, args: string[]) {
   const subcommand = args[0];
+
+  // v0.42 Wave C+D dispatch — new operator surfaces. These intercept
+  // BEFORE the existing links/timeline/all subcommand validation so they
+  // can use their own arg parsing.
+  //
+  //   gbrain extract status [--source-id ID] [--kind X] [--run-id Y] [--json]
+  //   gbrain extract benchmark --pack X --kind Y [--json]
+  //   gbrain extract --explain <kind>
+  if (subcommand === 'status') {
+    const { runExtractStatus } = await import('./extract-status.ts');
+    return runExtractStatus(engine, args.slice(1));
+  }
+  if (subcommand === 'benchmark') {
+    const { runExtractBenchmark } = await import('./extract-benchmark.ts');
+    return runExtractBenchmark(engine, args.slice(1));
+  }
+  if (args.includes('--explain')) {
+    const { runExtractExplain } = await import('./extract-explain.ts');
+    return runExtractExplain(engine, args);
+  }
+
   const dirIdx = args.indexOf('--dir');
   const explicitDir = dirIdx >= 0 && dirIdx + 1 < args.length;
   // When --dir is not passed, resolve from the configured brain source
@@ -509,7 +530,26 @@ export async function runExtract(engine: BrainEngine, args: string[]) {
   }
 
   if (!subcommand || !['links', 'timeline', 'all'].includes(subcommand)) {
-    console.error('Usage: gbrain extract <links|timeline|all> [--source fs|db] [--source-id <id>] [--dir <brain-dir>] [--dry-run] [--json] [--type T] [--since DATE]');
+    console.error(`Usage: gbrain extract <subcommand> [flags]
+
+Extraction (existing):
+  gbrain extract links    [--source fs|db] [--source-id <id>] [--dir <brain-dir>] [--dry-run] [--json] [--type T] [--since DATE] [--workers N]
+  gbrain extract timeline [--source fs|db] [--source-id <id>] [--dir <brain-dir>] [--dry-run] [--json] [--type T] [--since DATE] [--workers N]
+  gbrain extract all      [--source fs|db] [--source-id <id>] [--dir <brain-dir>] [--dry-run] [--json] [--type T] [--since DATE] [--workers N]
+  gbrain extract <links|timeline> --by-mention --source db
+  gbrain extract <links|timeline|all> --ner --source db
+  gbrain extract <timeline|all> --from-meetings
+
+Inspection (v0.42):
+  gbrain extract --explain <kind> [--json]
+      Print resolution chain for one pack-declared extractable kind.
+  gbrain extract benchmark --pack <name> --kind <type> [--json]
+      Run a pack's fixture corpus through the extractor (v0.42 reports
+      fixture shape; LLM dispatch comes in v0.43+).
+
+Status (v0.42):
+  gbrain extract status [--source-id ID] [--kind X] [--verbose] [--json]
+      Per-kind 7-day rollup: cost, halt rate, eval pass/fail counts.`);
     process.exit(1);
   }
 

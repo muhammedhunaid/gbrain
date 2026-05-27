@@ -2,6 +2,207 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.41.23.0] - 2026-05-26
+
+**You can now see how every extractor in your brain is doing — how
+often it halts, what it spent, whether its eval gate fired — and your
+pack manifests can declare new extractable kinds in one verb.**
+
+Pre-v0.41.23, when an extractor halted partway through a long page or a
+cycle phase silently stopped writing facts, you found out by querying
+the brain a week later and noticing things were missing. The
+information was theoretically in JSONL audit files, but the operator
+surface to read it didn't exist. Same gap on the authoring side: if you
+wanted your schema pack to declare a new extractable kind, you wrote
+YAML by hand and hoped you got the shape right.
+
+This release fixes both at the operator surface. Every extractor that
+runs in the brain (the deterministic facts.conversation extractor, the
+three LLM-backed cycle phases for atoms/concepts/takes, and the
+facts.fence reconciler) now writes one receipt page per run AND
+upserts a row into a 7-day rollup table. Receipts are queryable like
+any other page (they get a 0.3x source-boost demote so they surface in
+search but never dominate user content). The rollup powers the new
+`gbrain extract status` dashboard.
+
+How to use it:
+
+```bash
+gbrain extract status                    # 7-day rollup, top-5 by halt rate
+gbrain extract status --kind atoms       # filter to one extractor kind
+gbrain extract status --verbose --json   # full table + monitoring envelope
+
+gbrain extract --explain facts.conversation
+# Prints: which pack declares this kind (or "built-in cycle phase"),
+# what files it expects, eval dimensions, last 7d rollup.
+
+gbrain schema scaffold-extractable claim --pack my-pack
+# Generates 5 placeholder fixtures + a prompt template stub, declares
+# the type extractable on the pack manifest. Refuses on existing files
+# unless --force.
+
+gbrain extract benchmark --pack my-pack --kind claim
+# v0.41.23 ships as a stub-reporter (validates fixture corpus shape).
+# LLM dispatch deferred to a follow-up release.
+```
+
+What you'd see in a concrete example. Say your `extract_atoms` phase is
+silently halting on long conversation pages:
+
+| Kind                  | 7d cost  | Halts | Halt rate | Eval pass/fail |
+|-----------------------|----------|-------|-----------|----------------|
+| atoms                 | $0.30    | 5     | 50.0%     | 3 / 0          |
+| concepts              | $0.10    | 1     | 10.0%     | 1 / 0          |
+| facts.conversation    | $1.50    | 0     | 0.0%      | 5 / 0          |
+
+Before v0.41.23 you had to know to grep the JSONL audit files. Now `gbrain
+extract status` puts the halt rate above the fold, ordered most-troubled
+first.
+
+Things to watch:
+
+- Receipts have `dream_generated: true` AND `type: extract_receipt`
+  stamped (belt + suspenders — the eligibility predicate's anti-loop
+  guard would reject either alone, but having both means it cannot
+  silently start consuming its own output if one check ever drifts).
+- The rollup write is best-effort: a transient DB error during cycle
+  doesn't crash the cycle, it bumps a `rollup_write_failures` counter
+  that `gbrain doctor` surfaces on the next check.
+- `verifier_path` on `ExtractableSpec` is RESERVED in v0.41.23 — it parses
+  in pack manifests but refuses at runtime. Pack-shipped verifier code
+  arrives in a follow-up release under the trust-review gate.
+
+What's NOT in this release (deferred to a follow-up):
+
+- Replay versioning + `gbrain extract replay --since v<sha>`. Waiting
+  for real prompt-churn signal from pack-author usage before paying the
+  migration cost.
+- A unified `gbrain extract <kind>` LLM dispatcher. v0.41.13 explicitly
+  chose against routing extract through progressive-batch ("extraction
+  is pure deterministic regex; cost-cap value-add lives at the embed
+  step"); this release respects that decision.
+
+### To take advantage of v0.41.23.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if
+`gbrain doctor` warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Verify the new extract surfaces are live:**
+   ```bash
+   gbrain doctor --json | jq '.checks[] | select(.name == "extract_health")'
+   gbrain extract status
+   gbrain extract --explain facts.conversation
+   ```
+3. **If any step fails or the numbers look wrong,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+### Itemized changes
+
+**Wave A — schema + receipts foundation:**
+- `src/core/schema-pack/manifest-v1.ts` — `extractable` field widens
+  from `z.boolean()` to `z.union([z.boolean(), ExtractableSpecSchema])`.
+  Spec carries `prompt_template`, `fixture_corpus`, `eval_dimensions`,
+  `benchmark_min_recall`, and the reserved `verifier_path`. Back-compat
+  preserved — every existing pack parses unchanged.
+- `src/core/schema-pack/extractable.ts` — new `extractableSpecsFromPack`,
+  `getExtractableSpec`, and `refuseVerifierPathInV042` helpers. Boolean
+  shape maps to an empty default spec.
+- `src/core/types.ts` — `extract_receipt` joins ALL_PAGE_TYPES.
+- `src/core/search/source-boost.ts` — `extracts/` prefix gets factor
+  0.3 in DEFAULT_SOURCE_BOOSTS (D-EXTRACT-42).
+- `src/core/extract/receipt-writer.ts` (NEW) — `writeReceipt(engine,
+  input)` writes one receipt page per run. Slug shape per D-EXTRACT-17:
+  `extracts/{date}/{kind}/{source_id}/{run_id_short}/round-{N}.md`.
+  Frontmatter stamps BOTH `type: extract_receipt` AND `dream_generated:
+  true` per D-EXTRACT-19.
+- `src/core/extract/rollup-writer.ts` (NEW) — `upsertExtractRollup`
+  rolls per-run metrics into `extract_rollup_7d` via `INSERT ... ON
+  CONFLICT (kind, source_id, day) DO UPDATE`. Best-effort with a
+  process-scoped error-dedup so we never log the same DB error twice.
+- `src/core/migrate.ts` — v104 `extract_rollup_7d_table` adds the
+  rollup table + `idx_extract_rollup_7d_day` index. Mirrors in both
+  Postgres + PGLite via `sqlFor`.
+- `src/commands/doctor.ts` — new `extract_health` check reads the
+  rollup for the last 7 days, surfaces per-kind halt rate + cost +
+  eval pass/fail count, warns at halt rate > 10% AND when
+  rollup_write_failures > 0. Pre-v104 brains report `ok` silently.
+
+**Wave B — hook receipts into shipped extractors:**
+- `src/commands/extract-conversation-facts.ts` — writes receipt +
+  rollup row in both the success path AND the BudgetExhausted catch
+  path (so a mid-run cost-cap halt still produces a queryable
+  record). Threads `run_id` through the existing op-checkpoint id.
+- `src/core/cycle/extract-atoms.ts` — receipt per cycle tick, kind
+  `'atoms'`, round `'single'`, source-scoped from `phaseOpts.scope`.
+- `src/core/cycle/synthesize-concepts.ts` — receipt per tick, kind
+  `'concepts'`, source `'default'` (brain-global phase).
+- `src/core/cycle/propose-takes.ts` — receipt per tick, kind
+  `'takes.proposed'`.
+- `src/core/cycle/extract-facts.ts` — receipt per tick, kind
+  `'facts.fence'`, `cost_usd: 0` (deterministic reconciler).
+
+**Wave C — pack-author scaffolding + benchmark:**
+- `src/core/schema-pack/scaffold-extractable.ts` (NEW) — wraps
+  `updateTypeOnPack` from the v0.41 mutate library to declare a type
+  extractable in one verb. Generates 5 placeholder fixtures + a
+  pack-supplied prompt template under `packs/<pack>/fixtures/extract/`
+  and `packs/<pack>/prompts/extract/`. Refuses to overwrite existing
+  files unless `--force`.
+- `src/commands/schema.ts` — dispatch for `gbrain schema
+  scaffold-extractable <type> --pack <pack>`.
+- `src/commands/extract-benchmark.ts` (NEW) — `gbrain extract
+  benchmark --pack <name> --kind <type>`. Loads the pack's fixture
+  corpus through strict D-EXTRACT-21 path validation (rejects absolute
+  paths, `..` traversal, null bytes, AND symlinks that resolve outside
+  pack root). v0.41.23 ships as a stub reporter; LLM dispatch deferred.
+
+**Wave D — operator surfaces:**
+- `src/commands/extract-status.ts` (NEW) — `gbrain extract status
+  [--source-id ID] [--kind X] [--verbose] [--json]`. Reads
+  `extract_rollup_7d` for the last 7 days, sorts by (halt_rate desc,
+  cost desc). Kubectl-style table; top-5 by default with `... +N more
+  rows (pass --verbose for all)` hint. JSON envelope `schema_version:
+  1` for monitoring pipelines.
+- `src/commands/extract-explain.ts` (NEW) — `gbrain extract --explain
+  <kind>`. Prints declaration source (pack-declared vs built-in cycle
+  phase), prompt_template + fixture_corpus paths with `✓`/`(missing)`
+  markers, eval_dimensions, benchmark_min_recall, and the last 7d
+  rollup row.
+- `src/commands/extract.ts` — top-level dispatch for `status`,
+  `benchmark`, and `--explain` subcommands intercepted before the
+  existing `links`/`timeline`/`all` parser. Help text reorganized into
+  Extraction / Inspection / Status sections.
+
+**Tests:**
+- `test/extractable-spec-widening.test.ts` (NEW, 22 cases) —
+  back-compat boolean shape parses, struct shape parses, helpers,
+  D-EXTRACT-37 verifier_path refuse at runtime.
+- `test/extract/receipt-writer.test.ts` (NEW, 12 cases) — slug shape,
+  frontmatter belt+suspenders, idempotent resume. Uses the canonical
+  PGLite block per CLAUDE.md R3+R4 (one engine per file,
+  `resetPgliteState` in `beforeEach`).
+- `test/extract/benchmark.test.ts` (NEW, 17 cases) — path validation
+  rejections (absolute, `..`, null bytes, symlink-outside-pack,
+  symlink-inside-pack-resolves-outside) + JSONL contract enforcement
+  (rejects arrays passing typeof object check).
+- `test/extract/status.test.ts` (NEW, 15 cases) — pure aggregation +
+  formatting over mock rollup rows.
+- `test/schema-pack/scaffold-extractable.test.ts` (NEW, 15 cases) —
+  scaffold mechanics + explicit privacy-rule assertions guarding
+  against real-name leakage in placeholder fixtures.
+- `test/doctor-extract-health.test.ts` (NEW, 8 cases) — empty/healthy/
+  warn-on-halt-rate/warn-on-rollup-failure cases.
+- `test/propose-takes.test.ts` — assertion tightened from `INSERT` to
+  `INSERT INTO take_proposals` so the new rollup INSERT doesn't
+  trigger a false positive in the existing test.
+
 ## [0.41.22.1] - 2026-05-27
 
 **Your `gbrain brainstorm` and `gbrain lsd` calls now actually score the ideas they generate.**

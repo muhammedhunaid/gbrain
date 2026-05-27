@@ -14,6 +14,7 @@ import {
 } from '../src/core/onboard/checks.ts';
 import { toOnboardRecommendation } from '../src/core/onboard/render.ts';
 import { _resetPackCacheForTests } from '../src/core/schema-pack/registry.ts';
+import { _resetPackLocatorForTests } from '../src/core/schema-pack/load-active.ts';
 
 let engine: PGLiteEngine;
 
@@ -30,6 +31,14 @@ afterAll(async () => {
 beforeEach(async () => {
   await resetPgliteState(engine);
   _resetPackCacheForTests();
+  // Defensive reset: sibling test files in the same shard process
+  // (test/schema-pack-sync.test.ts) call __setPackLocatorForTests to
+  // stub the disk-loader. The mutation persists module-level across
+  // files; without this reset, the stubbed locator returns null for
+  // gbrain-base / gbrain-base-v2 and findPackSuccessors silently returns
+  // []. Repros only when sync.test.ts runs first in the same shard, so
+  // local single-file runs pass but CI shard 6 fails.
+  _resetPackLocatorForTests();
 });
 
 async function seedPages(types: string[]) {

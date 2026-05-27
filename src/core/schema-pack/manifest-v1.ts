@@ -43,7 +43,45 @@ const LinkTypeSchema = z.object({
 }).strict();
 
 /**
- * v0.42 (T3, plan D5): per-page-type subtype-detection rule. The rule fires
+ * v0.41.23 — ExtractableSpec widening. `extractable` is now `boolean | struct`.
+ *
+ * v0.38 shape (`extractable: true`) stays valid forever; resolves to a
+ * minimal default spec with empty fields. Pack authors opt into the struct
+ * shape when they want pack-supplied prompts / fixtures / eval dimensions
+ * for an LLM-backed extractor running over their page type.
+ *
+ * Forward-compat: `verifier_path` is RESERVED in v0.41.23. The parser accepts
+ * the field (validated as relative path within pack root by future logic)
+ * but the runtime REFUSES to load pack-shipped verifier code in v0.41.23 —
+ * a follow-up release trust review is the gate. Pack authors who write the
+ * path early get a clear runtime refuse message; they're not blocked at
+ * parse time.
+ *
+ * See plan D-EXTRACT-17/19/21/37/42/47 for the load-bearing decisions.
+ */
+const ExtractableSpecSchema = z.object({
+  /** Pack-supplied LLM prompt template. Plain text; sent to gateway.chat()
+   * with NO conversation context per the v0.41.23 threat model. */
+  prompt_template: z.string().optional(),
+  /** Relative path within pack root to a JSONL fixture corpus. Validated
+   * against path traversal at parse + load time. */
+  fixture_corpus: z.string().optional(),
+  /** Per-kind eval dimensions for the cross-modal eval gate. Open string
+   * array; specific values consumed by `gbrain extract benchmark`. */
+  eval_dimensions: z.array(z.string()).default([]),
+  /** Optional recall floor for `gbrain extract benchmark` CI gate.
+   * Defaults to 0.8 at consume site when omitted. */
+  benchmark_min_recall: z.number().min(0).max(1).optional(),
+  /** RESERVED for a follow-up release: relative path to pack-shipped verifier
+   * code. Validated as relative + within-pack at parse; REFUSES at runtime
+   * in v0.41.23 with paste-ready hint. */
+  verifier_path: z.string().optional(),
+}).strict();
+
+export type ExtractableSpec = z.infer<typeof ExtractableSpecSchema>;
+
+/**
+ * v0.41.22 (T3, plan D5): per-page-type subtype-detection rule. The rule fires
  * when (a) frontmatter has a matching key+value, OR (b) the source path
  * matches the regex. ReDoS-guarded compile happens at pack-load (registry).
  */
@@ -75,10 +113,18 @@ const PageTypeSchema = z.object({
    */
   aliases: z.array(z.string()).default([]),
   /**
-   * Whether the page-type is eligible for facts extraction (gates
-   * `src/core/facts/eligibility.ts:49` per T3 codex finding).
+   * Whether the page-type is eligible for facts extraction.
+   *
+   * - `boolean` (v0.38 shape): true = extractable with default LLM handler;
+   *   false = not extractable. Gates `src/core/facts/eligibility.ts:49`.
+   * - `ExtractableSpec` (v0.42 widening): pack-supplied prompt + fixtures
+   *   + eval dimensions for the pack-author authoring loop. Implies true
+   *   for eligibility purposes.
+   *
+   * Defaults to false. Back-compat: every pre-v0.42 pack manifest with
+   * `extractable: true` continues to parse unchanged.
    */
-  extractable: z.boolean().default(false),
+  extractable: z.union([z.boolean(), ExtractableSpecSchema]).default(false),
   /**
    * Whether this type is an "expert" for find_experts / whoknows queries
    * (replaces hardcoded ['person','company'] at whoknows.ts:89 + the
