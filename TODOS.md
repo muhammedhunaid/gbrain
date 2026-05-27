@@ -1,5 +1,96 @@
 # TODOS
 
+## v0.41.20.x dream-source-ingest-titles follow-ups (v0.42+)
+
+- **TODO-V13-A (P2): `gbrain dream --max-pages <n>` plumbing.**
+  PR #1559 included a `--max-pages` flag for cost-bounded cycles on
+  large brains. v0.41.20 dropped it because `CycleOpts` has no `maxPages`
+  field and no cycle phase consults page-count limits — shipping the flag
+  would have been a lying flag.
+  - **What:** extend `CycleOpts` with `maxPages: number | undefined` and
+    thread it through extract phases (extract.ts, extract-facts.ts,
+    recompute-emotional-weight.ts) so per-source cost-bounded cycles
+    become real.
+  - **Why:** straylight-brain-class corpora (100K+ pages) benefit from
+    capping each cycle's work. Today operators have to wait full
+    extract sweeps regardless of cost.
+  - **Pros:** closes the lying-flag class; real cost brake.
+  - **Cons:** real refactor — extract phases iterate all pages today,
+    not page-count-bounded.
+  - **Context:** PR #1559 commit 67f98ca had the flag; the v0.41.20
+    plan dropped it under "Out of scope" with this TODO as the
+    forwarding pointer.
+  - **Depends on:** CycleOpts type extension + extract page-iteration
+    refactor + decision on per-phase vs per-cycle cap semantics.
+
+- **TODO-V13-B (P3): `--source` / `--source-id` flag-name unification.**
+  Current drift: `dream`, `recall`, `sync` accept `--source`;
+  `import`, `extract`, `graph-query`, `sources` accept `--source-id`.
+  v0.41.20 added `--source-id` as an alias for dream's `--source` so
+  both work, but the codebase still ships two surface names.
+  - **What:** pick one canonical flag name across all CLI commands;
+    deprecate the other with a stderr warning; update doctor.ts
+    hint to match.
+  - **Why:** ergonomic consistency. Users who learned `--source-id`
+    via import shouldn't trip on `--source` in dream.
+  - **Pros:** ends a real user-facing confusion.
+  - **Cons:** low-priority polish; both names work today via alias.
+  - **Context:** doctor.ts historically pinned `--source`; v0.37.7.0
+    #1167 standardized `--source-id` across new commands. Recommend
+    picking `--source-id` for v0.37.7.0+ consistency and deprecating
+    `--source` over one minor.
+  - **Depends on:** nothing technical.
+
+- **TODO-V13-C (P2): `gbrain pages audit-junk-titles` legacy cleanup.**
+  v0.41.20 widened the `error_page_title` matcher to catch Cloudflare /
+  WAF challenge titles ("Forbidden", "Access Denied", "Service
+  Unavailable", "Robot Check", "Just a moment...") at ingest. But the
+  200+ scraper pages already in production DBs (202+ from
+  straylight-brain) are NOT cleaned up by the matcher widening.
+  Dropped from v0.41.20 per codex outside-voice tension (T1) for
+  ship-and-validate-matchers-first discipline.
+  - **What:** new operator command for soft-deleting pre-existing
+    scraper-junk pages whose titles match the expanded
+    `BUILT_IN_JUNK_PATTERNS`. Full spec preserved:
+    - Signature: `gbrain pages audit-junk-titles [--source <id>]
+      [--dry-run|--apply] [--confirm-destructive] [--json]`
+    - Default `--dry-run`. Prints `{pattern_name: count, sample_slugs}`.
+    - `--apply` requires `--confirm-destructive` when match count
+      exceeds `DESTRUCTIVE_THRESHOLD` (reuse v0.26.5 constant).
+    - `--source <id>` scopes; without it, audits all non-archived
+      sources (filter via `listAllSources().filter(s => !s.archived)`).
+    - Soft-delete via existing `engine.softDeletePage(slug, sourceId)`.
+    - Audit JSONL via `logContentSanityEvent` with event kind
+      `junk_title_soft_deleted`.
+    - Idempotent.
+    - **Hybrid SQL+JS scanner**: pure
+      `buildJunkTitleSqlClause(patterns)` +
+      `scanForJunkTitles(rows, patterns)`. SQL pre-filter avoids
+      streaming all rows over the wire (perf rationale: even seq-scan
+      ILIKE beats JS regex per-row via the postgres driver).
+    - **`cleanup_safe: boolean` flag** per JunkPattern (codex C-13):
+      only patterns flagged `cleanup_safe: true` are eligible for
+      destructive cleanup. Stops future matcher widening from
+      automatically expanding destructive scope. Initial allowlist:
+      `cloudflare_attention_required`, `cloudflare_just_a_moment`,
+      `cloudflare_ray_id`, `access_denied`, `captcha_required`,
+      `error_page_title` (only the literal-numeric parts; the new
+      word-titles get `cleanup_safe: false` until the matcher proves
+      itself further), `cloudflare_challenge_title`.
+    - New doctor check `scraper_junk_pages_legacy` (separate from
+      `content_sanity_audit_recent` per codex C-5 — audit-log reader
+      vs live DB scan are different concerns).
+    - Tests: `test/pages-audit-junk-titles.test.ts` (hermetic PGLite),
+      `test/doctor.test.ts` extension.
+  - **Why:** ingest gate alone leaves 200+ existing junk pages
+    inflating page counts; this command closes the data-debt gap.
+  - **Pros:** finishes the cleanup story.
+  - **Cons:** destructive surface (soft-delete + audit JSONL).
+  - **Depends on:** ~1 week of production observation against
+    v0.41.20's new ingest matchers. If real-world reports surface
+    false-positive blocks, refine the matcher AND the `cleanup_safe`
+    allowlist before shipping the destructive command.
+
 ## v0.41.22.1 brainstorm judge fix-wave follow-ups (v0.42+)
 
 Filed from the v0.41.22.1 plan-eng-review per cross-model-tension D13c.

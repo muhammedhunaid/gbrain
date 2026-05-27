@@ -2,6 +2,193 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.41.26.0] - 2026-05-27
+
+**`gbrain dream --source <id>` finally counts as a cycle.**
+
+If you have more than one brain source — a personal brain plus
+media-corpus plus a team brain — `gbrain dream --source media-corpus`
+used to run the cycle but never tell anyone it ran. The doctor would
+say "media-corpus cycle is 60 hours stale" right after you re-ran
+dream. You re-ran it. Still stale. Forever. Cron jobs scoped to one
+source kept looping with no way to make the freshness gate go green.
+
+Fixed. Now `gbrain dream --source <id>` records the completion
+timestamp on the source, so `gbrain doctor`'s `cycle_freshness` check
+goes green the moment the cycle finishes. The flag also accepts
+`--source-id` (matches the naming every other v0.37.7.0+ command uses
+— `gbrain import --source-id`, `gbrain extract --source-id`,
+`gbrain graph-query --source-id`). Both names work; pick whichever
+you already remember.
+
+Two safety rails came along for the ride:
+
+- `gbrain dream --source <unknown>` errors clean ("Source not found.
+  Run `gbrain sources list`...") instead of silently passing
+  through and writing nothing.
+- `gbrain dream --source <archived>` refuses with a paste-ready
+  `gbrain sources restore <id>` hint instead of stamping a fresh
+  cycle timestamp on a hidden source (which would mask data
+  staleness if you later restored it).
+
+**Bonus housekeeping: ingest now blocks more scraper junk.**
+
+Cloudflare and WAF challenge pages with titles like `Just a
+moment...`, `Forbidden`, `Access Denied`, `Service Unavailable`, and
+`Robot Check` used to slip through ingest because the matcher only
+caught bare numeric codes (`403`, `404`, `500`...). They now hit the
+same gate that's always caught the numeric ones. Real essays titled
+"How to handle Access Denied errors" or "Forbidden Knowledge" still
+ingest fine — the gate only fires when the title is exclusively the
+error phrase (with optional trailing whitespace), so longer-form
+prose passes through.
+
+The Cloudflare challenge title gets its own audit name
+(`cloudflare_challenge_title`) instead of being grouped under
+`error_page_title`, so operators reading the `~/.gbrain/audit/
+content-sanity-YYYY-Www.jsonl` log or running `gbrain doctor` can
+distinguish "this was a 403" from "this was a Cloudflare challenge".
+
+Cleanup for the 200+ pre-existing scraper pages already in your DB
+ships in a follow-up PR (`gbrain pages audit-junk-titles`) after
+this matcher has a week of production observation. The ingest gate
+is reversible (won't accept the page); the cleanup is destructive
+(soft-delete) and deserves its own observation window before it
+gains authority to delete.
+
+**Third smaller fix: dream cycle no longer crashes on
+emoji-at-offset-4000.**
+
+The `judgeSignificance` step of the dream cycle was using a raw 4000-
+character slice that could split the UTF-16 surrogate pair encoding
+a non-BMP emoji (`🤖` and friends) right down the middle. Anthropic's
+JSON parser would then reject the prompt with `"no low surrogate in
+string"`, the whole synthesize phase would fail (`SYNTH_PHASE_FAIL`),
+and your transcript wouldn't get processed. It happened on a real
+telegram transcript on 2026-05-24.
+
+`judgeSignificance` now routes both head and tail slices through the
+canonical `safeSplitIndex` helper from `src/core/text-safe.ts` (the
+same helper `findBoundary` has used since v0.42.0.0). Same content
+budget, same trimming, just safe at the surrogate boundary. No more
+emoji-class crashes.
+
+This release supersedes community PRs #1559 and #1561 (both by
+`@garrytan-agents`). PR #1559's `--max-pages` flag was dropped from
+this release because the cycle plumbing doesn't exist to honor it
+yet (shipping the flag would be a lying flag); filed as a v0.42+
+follow-up.
+
+### To take advantage of v0.41.26.0
+
+`gbrain upgrade` should do this automatically. If you target a
+specific source via cron or by hand:
+
+1. **Replace** any `gbrain dream` cron line that was meant to scope
+   to a source but didn't have the flag working. Add `--source <id>`:
+   ```bash
+   # Old (silently brain-wide, never wrote per-source freshness):
+   0 2 * * * gbrain dream --json >> ~/gbrain.log
+   # New (per-source freshness keeps doctor green):
+   0 2 * * * gbrain dream --source media-corpus --json >> ~/gbrain.log
+   ```
+2. **Verify** the freshness gate flips. After a successful run:
+   ```bash
+   gbrain doctor --json | jq '.checks[] | select(.name=="cycle_freshness")'
+   # Should show status="ok" for the source you cycled.
+   ```
+3. **If any step fails or doctor doesn't go green,** file an issue:
+   https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - the exact `gbrain dream` command you ran
+   - the source's row from `sources` table (config column)
+
+### Itemized changes
+
+**dream --source / --source-id (supersedes PR #1559):**
+- `DreamArgs.source` field added; `parseArgs` recognizes `--source
+  <id>` AND the alias `--source-id <id>`.
+- Argv validation: missing value → exit 2; repeated with different
+  values → exit 2; `--source X --source-id Y` (conflict) → exit 2;
+  same value repeated is accepted.
+- `--help` short-circuit ordering preserved (IRON RULE comment + test
+  guard); `gbrain dream --help --source whatever` always prints help
+  and exits 0.
+- `runDream` engine-null guard: `--source` requires a connected brain
+  (matches the v0.37.7.0 #1167 pattern across import/extract/
+  graph-query).
+- `runDream` archived-source guard: refuses with `gbrain sources
+  restore <id>` hint instead of stamping `last_full_cycle_at` on a
+  hidden source.
+- `runDream` typed-error try/catch via `isResolverUserError`
+  predicate: only matches the resolver's known user-facing throws;
+  TypeError / postgres errors propagate with stack trace so genuine
+  bugs aren't hidden as operator errors.
+- Forwarded `sourceId` to `runCycle`; the existing v0.38 writeback in
+  `cycle.ts:1947-1967` now actually fires.
+- `--help` text documents both flag names and the `cycle_freshness`
+  unlock.
+
+**Surrogate-safe trimming in synthesize.ts (PR #1559+#1561 wave commit
+`78b93f3`, productionized correctly):**
+- `judgeSignificance` slice routed through `safeSplitIndex` from
+  `src/core/text-safe.ts` (canonical helper).
+- Did NOT introduce the duplicate `safeSliceEnd` helper from the
+  original PRs (it re-introduces the case-3 bug `text-safe.ts:18-21`
+  documents).
+- Did NOT touch `findBoundary` — already routes through
+  `safeSplitIndex` in master.
+
+**Expanded `error_page_title` regex (supersedes PR #1561):**
+- Caught: `forbidden`, `access denied`, `service unavailable`,
+  `robot check`, `verify you are human` (case-insensitive,
+  anchored).
+- Dropped PR #1561's bare-`error` matcher — too aggressive on
+  legitimate taxonomy pages titled "Error".
+- New `cloudflare_challenge_title` pattern (separate name from
+  `error_page_title`) for the title-scoped Cloudflare challenge —
+  preserves audit-log diagnosability (PR #1561 collapsed both into
+  one name).
+
+**Tests:**
+- `test/dream-cli-flags.test.ts` — structural assertions for new
+  flags, help text, IRON-RULE comment guard.
+- `test/dream.test.ts` — 12 PGLite integration cases covering
+  --source happy path (the bug fix regression), back-compat,
+  --source-id alias, repetition/conflict/missing-value, engine-null,
+  archived, --help short-circuit ordering, TypeError propagation
+  (the typed-error catch can't hide programmer bugs).
+- `test/dream.test.ts` end-to-end dream→checkCycleFreshness case
+  (D5): closes column-rename drift bug class.
+- `test/cycle-synthesize.test.ts` — UTF-16 safety describe block
+  with `test.each` over head + tail surrogate-boundary offsets;
+  primary assertion is an explicit unpaired-surrogate scan (NOT
+  `JSON.stringify`, which doesn't throw on lone surrogates in V8).
+- `test/content-sanity.test.ts` — new pattern matches +
+  over-match regression guard ("How to Handle Access Denied
+  Errors" must pass) + audit-name distinctness.
+- `test/import-file-content-sanity.test.ts` — end-to-end
+  `importFromContent` integration via `test.each` for each new
+  pattern family.
+
+**Out of scope, filed in TODOS.md:**
+- `gbrain dream --max-pages <n>` plumbing (PR #1559 dropped — needs
+  cycle-phase iteration refactor).
+- `--source` vs `--source-id` flag-name unification across the CLI.
+- `gbrain pages audit-junk-titles` legacy cleanup command (deferred
+  for ~1 week of matcher production observation before destructive
+  cleanup ships).
+
+### For contributors
+
+- Codex outside-voice review surfaced 18 findings against the plan;
+  11 absorbed inline (typed-error try/catch tightening, doctor check
+  separation, help-ordering documentation, repetition rules,
+  surrogate-safety contract, dropped weak `JSON.stringify`
+  assertion). Two substantive cross-model tensions resolved via
+  explicit user decision (T1 drop Fix 4, T3 typed-error catch).
+- Plan + 11 AskUserQuestion decision points captured at
+  `~/.claude/plans/system-instruction-you-are-working-starry-papert.md`.
 
 ## [0.41.25.0] - 2026-05-27
 
