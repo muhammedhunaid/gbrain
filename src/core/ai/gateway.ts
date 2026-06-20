@@ -2308,6 +2308,7 @@ export type ChatRole = 'system' | 'user' | 'assistant' | 'tool';
 
 export type ChatBlock =
   | { type: 'text'; text: string }
+  | { type: 'image'; image: { data: string; mime: string } }
   | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown }
   | { type: 'tool-result'; toolCallId: string; toolName: string; output: unknown; isError?: boolean };
 
@@ -2362,6 +2363,7 @@ export function toModelMessages(messages: ChatMessage[]): unknown[] {
       role: m.role,
       content: blocks.map((b) => {
         if (b.type === 'text') return { type: 'text' as const, text: b.text };
+        if (b.type === 'image') return { type: 'image' as const, image: `data:${b.image.mime};base64,${b.image.data}` };
         if (b.type === 'tool-call') return { type: 'tool-call' as const, toolCallId: b.toolCallId, toolName: b.toolName, input: b.input };
         return b;
       }),
