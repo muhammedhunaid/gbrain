@@ -722,11 +722,16 @@ async function seedUnits(eng: BrainEngine): Promise<void> {
   );
   const docId = pageRow[0].id;
 
-  // Row 1: text unit with JSONB bbox and provenance, using executeRawJsonb
+  // Row 1: text unit with JSONB bbox and provenance, using executeRawJsonb.
+  // Scalar columns (document_id, type, reading_order, confidence) map to
+  // the leading $1..$4 slots; JSONB columns (bbox, provenance) map to the
+  // trailing $5..$6 slots (with ::jsonb casts), matching the
+  // [...scalarParams, ...jsonbParams] concatenation order that
+  // executeRawJsonb applies internally.
   await executeRawJsonb(
     eng,
-    `INSERT INTO units (document_id, type, reading_order, bbox, provenance, confidence)
-     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)`,
+    `INSERT INTO units (document_id, type, reading_order, confidence, bbox, provenance)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)`,
     [docId, 'text', 1, 0.9],
     [{ x: 10, y: 20, w: 200, h: 50 }, { model: 'layoutlm', version: '1' }],
   );

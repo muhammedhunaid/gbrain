@@ -5414,9 +5414,10 @@ export const MIGRATIONS: Migration[] = [
     // on Postgres requires running outside a transaction (`transaction: false`).
     // PGLite has no concurrent writers so it uses a plain CREATE INDEX.
     //
-    // Mirrors the v97/v104 pattern: Postgres pre-drops any invalid remnant from
-    // a prior failed CONCURRENTLY attempt via pg_index.indisvalid, then creates
-    // the index CONCURRENTLY. PGLite uses a plain CREATE INDEX.
+    // Follows the established CREATE INDEX CONCURRENTLY pre-drop pattern used
+    // throughout MIGRATIONS: Postgres pre-drops any invalid remnant from a prior
+    // failed CONCURRENTLY attempt via pg_index.indisvalid, then creates the index
+    // CONCURRENTLY. PGLite uses a plain CREATE INDEX (no concurrent writers).
     idempotent: true,
     transaction: false,
     sql: '',
