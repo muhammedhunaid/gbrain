@@ -18,6 +18,7 @@ import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import type { ChunkInput, SearchResult } from '../../src/core/types.ts';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { hasDatabase, setupDB, teardownDB, getEngine } from './helpers.ts';
+import { executeRawJsonb } from '../../src/core/sql-query.ts';
 
 const SKIP_PG = !hasDatabase();
 const describeBoth = SKIP_PG ? describe.skip : describe;
@@ -696,5 +697,110 @@ describeBoth('Engine parity — federated sourceIds[] secondary reads (#2200)', 
       const pglite = (await pgliteEngine.getTimeline('fed/doc', opts)).map(e => e.summary).sort();
       expect(pg).toEqual(pglite);
     }
+  });
+});
+
+// ============================================================
+// Engine parity — units table (PR2 visual-doc-foundation T004/T005)
+// ============================================================
+// Seeds a couple of units rows into BOTH engines with JSONB columns written
+// via executeRawJsonb (never JSON.stringify(...)::jsonb) and asserts read
+// parity between Postgres and PGLite.
+//
+// Skips locally when DATABASE_URL is absent (SKIP_PG = true); always
+// type-checks and is correct for CI with real Postgres.
+
+async function seedUnits(eng: BrainEngine): Promise<void> {
+  await eng.putPage('units/doc-a', {
+    title: 'Document A',
+    type: 'note',
+    compiled_truth: 'multimodal doc content',
+    timeline: '',
+  });
+  const pageRow = await eng.executeRaw<{ id: number }>(
+    `SELECT id FROM pages WHERE slug = 'units/doc-a' LIMIT 1`
+  );
+  const docId = pageRow[0].id;
+
+  // Row 1: text unit with JSONB bbox and provenance, using executeRawJsonb
+  await executeRawJsonb(
+    eng,
+    `INSERT INTO units (document_id, type, reading_order, bbox, provenance, confidence)
+     VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6)`,
+    [docId, 'text', 1, 0.9],
+    [{ x: 10, y: 20, w: 200, h: 50 }, { model: 'layoutlm', version: '1' }],
+  );
+
+  // Row 2: figure unit, no JSONB (nulls for bbox/provenance)
+  await eng.executeRaw(
+    `INSERT INTO units (document_id, type, reading_order, confidence)
+     VALUES ($1, 'figure', 2, $2)`,
+    [docId, 0.75]
+  );
+}
+
+describeBoth('Engine parity — units table', () => {
+  let pgEngine: BrainEngine;
+  let pgliteEngine: PGLiteEngine;
+
+  beforeAll(async () => {
+    pgEngine = await setupDB();
+    await seedUnits(pgEngine);
+    pgliteEngine = new PGLiteEngine();
+    await pgliteEngine.connect({});
+    await pgliteEngine.initSchema();
+    await seedUnits(pgliteEngine);
+  }, 90_000);
+
+  afterAll(async () => {
+    await pgliteEngine.disconnect();
+    await teardownDB();
+  }, 30_000);
+
+  test('row count identical on both engines', async () => {
+    const pgCount = (await pgEngine.executeRaw<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM units`
+    ))[0].n;
+    const pgliteCount = (await pgliteEngine.executeRaw<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM units`
+    ))[0].n;
+    expect(pgCount).toBe(pgliteCount);
+    expect(pgCount).toBe(2);
+  });
+
+  test('reading_order and type values identical on both engines', async () => {
+    const pgRows = await pgEngine.executeRaw<{ type: string; reading_order: number }>(
+      `SELECT type, reading_order FROM units ORDER BY reading_order`
+    );
+    const pgliteRows = await pgliteEngine.executeRaw<{ type: string; reading_order: number }>(
+      `SELECT type, reading_order FROM units ORDER BY reading_order`
+    );
+    expect(pgRows).toEqual(pgliteRows);
+    expect(pgRows).toEqual([
+      { type: 'text', reading_order: 1 },
+      { type: 'figure', reading_order: 2 },
+    ]);
+  });
+
+  test('JSONB bbox round-trips identically on both engines', async () => {
+    const pgBbox = (await pgEngine.executeRaw<{ x: number }>(
+      `SELECT (bbox->>'x')::int AS x FROM units WHERE type = 'text' LIMIT 1`
+    ))[0].x;
+    const pgliteBbox = (await pgliteEngine.executeRaw<{ x: number }>(
+      `SELECT (bbox->>'x')::int AS x FROM units WHERE type = 'text' LIMIT 1`
+    ))[0].x;
+    expect(pgBbox).toBe(pgliteBbox);
+    expect(pgBbox).toBe(10);
+  });
+
+  test('JSONB provenance round-trips identically on both engines', async () => {
+    const pgProv = (await pgEngine.executeRaw<{ model: string }>(
+      `SELECT provenance->>'model' AS model FROM units WHERE type = 'text' LIMIT 1`
+    ))[0].model;
+    const pgliteProv = (await pgliteEngine.executeRaw<{ model: string }>(
+      `SELECT provenance->>'model' AS model FROM units WHERE type = 'text' LIMIT 1`
+    ))[0].model;
+    expect(pgProv).toBe(pgliteProv);
+    expect(pgProv).toBe('layoutlm');
   });
 });

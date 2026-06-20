@@ -1084,6 +1084,31 @@ CREATE INDEX IF NOT EXISTS page_aliases_lookup_idx
   ON page_aliases (source_id, alias_norm);
 CREATE INDEX IF NOT EXISTS page_aliases_slug_idx
   ON page_aliases (source_id, slug);
+
+-- units: semantic units of visually-rich documents (PR2 visual-doc-foundation)
+-- Each row is a detected region (table, figure, chart, text block, caption, or
+-- section heading) extracted from a document page. The embedding column carries
+-- a 1024-dim multimodal vector mirroring content_chunks.embedding_multimodal.
+-- document_id references pages(id) so units are page-scoped and cascade-deleted
+-- with the parent page.
+CREATE TABLE IF NOT EXISTS units (
+  id               BIGSERIAL PRIMARY KEY,
+  document_id      INTEGER     NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+  type             TEXT        NOT NULL CHECK (type IN ('table','figure','chart','text','caption','section')),
+  page_numbers     INTEGER[],
+  bbox             JSONB,
+  reading_order    INTEGER,
+  provenance       JSONB,
+  confidence       REAL,
+  embedding        vector(1024),
+  source_image_ref TEXT,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_units_document_id ON units (document_id);
+CREATE INDEX IF NOT EXISTS idx_units_type ON units (type);
+CREATE INDEX IF NOT EXISTS idx_units_reading_order ON units (document_id, reading_order);
+CREATE INDEX IF NOT EXISTS idx_units_embedding_hnsw ON units USING hnsw (embedding vector_cosine_ops) WHERE embedding IS NOT NULL;
 `;
 
 /**
