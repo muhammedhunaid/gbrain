@@ -1712,6 +1712,12 @@ export async function registerBuiltinHandlers(
   worker.register('ingest_capture', makeIngestCaptureHandler(engine));
 
   // ============================================================
+  // PR3 visual-ingest: render→layout→crop→embed→persist handler
+  // ============================================================
+  const { makeVisualIngestHandler } = await import('../core/minions/handlers/visual-ingest.ts');
+  worker.register('ingest_visual_doc', makeVisualIngestHandler(engine));
+
+  // ============================================================
   // v0.36+ brain-health-100 wave: 11 new handlers for autonomous
   // remediation via `gbrain doctor --remediate` and autopilot.
   //
