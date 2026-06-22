@@ -5016,6 +5016,57 @@ const run_skillopt: Operation = {
   },
 };
 
+// --- Visual Document Ingest ---
+
+const ingest_visual_doc: Operation = {
+  name: 'ingest_visual_doc',
+  description:
+    'Ingest a visual document (PDF): render pages, detect layout, crop semantic units, embed, and persist to the units table. Queued to a background minion.',
+  params: {
+    path: {
+      type: 'string',
+      required: true,
+      description: 'Local filesystem path to the PDF.',
+    },
+    source_id: {
+      type: 'string',
+      description: 'Source scope (default: ctx.sourceId / "default").',
+    },
+    slug: {
+      type: 'string',
+      description: 'Optional slug for the parent page; default inbox/visual/<hash6>.',
+    },
+    queue: {
+      type: 'string',
+      description: 'Queue name (default "default").',
+    },
+  },
+  mutating: true,
+  scope: 'admin',
+  handler: async (ctx, p) => {
+    // Local-only: PDF path access is filesystem-bound — reject remote/MCP callers (fail-closed).
+    if (ctx.remote !== false) {
+      throw new OperationError('permission_denied', 'ingest_visual_doc requires a trusted local caller');
+    }
+    const path = typeof p.path === 'string' ? p.path.trim() : '';
+    if (!path) throw new OperationError('invalid_request', 'path is required');
+    if (ctx.dryRun) return { dry_run: true, action: 'ingest_visual_doc', path };
+
+    const { MinionQueue } = await import('./minions/queue.ts');
+    const queue = new MinionQueue(ctx.engine);
+    const job = await queue.add(
+      'ingest_visual_doc',
+      {
+        filePath: path,
+        sourceId: (p.source_id as string) || ctx.sourceId || 'default',
+        slug: p.slug as string | undefined,
+      },
+      { queue: (p.queue as string) || 'default', max_attempts: 3 },
+    );
+    return { job_id: job.id, status: job.status };
+  },
+};
+
 export const operations: Operation[] = [
   // Page CRUD
   get_page, put_page, delete_page, list_pages,
@@ -5097,6 +5148,8 @@ export const operations: Operation[] = [
   // deny-all for remote callers). NOT localOnly so admin OAuth clients
   // can submit; CLI bypass via ctx.remote === false.
   run_skillopt,
+  // T012: visual document ingest (admin, queued, local-only).
+  ingest_visual_doc,
 ];
 
 export const operationsByName = Object.fromEntries(
