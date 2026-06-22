@@ -29,6 +29,7 @@ import { cropUnitFromPdf } from '../../ingestion/visual/crop.ts';
 import { executeRawJsonb } from '../../sql-query.ts';
 import { detectLayout } from '../../ai/layout/detect-layout.ts';
 import { embedMultimodal } from '../../ai/gateway.ts';
+import { loadConfig } from '../../config.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -38,8 +39,16 @@ const RENDER_DPI = 200;
 /** Path to pdfinfo binary (mirrors PDFTOPPM_BIN in render.ts). */
 const PDFINFO_BIN = '/usr/bin/pdfinfo';
 
-/** Vision model passed to detectLayout (undefined = gateway default). */
-const LAYOUT_MODEL: string | undefined = undefined;
+// detectLayout's vision model is read per-job from the file-plane config key
+// `visual.layout_model` (see resolveLayoutModel below); undefined falls back to
+// the gateway's default chat model.
+//
+// NOTE: `visual.embedding_model` is shipped but NOT yet routed here — embedMultimodal
+// resolves its model from the gateway config (embedding_multimodal_model), and a
+// per-call override isn't on its API yet. TODO(PR4/PR6): route visual.embedding_model.
+function resolveLayoutModel(): string | undefined {
+  return loadConfig()?.visual?.layout_model;
+}
 
 // ---- types ------------------------------------------------------------------
 
@@ -190,7 +199,7 @@ export function makeVisualIngestHandler(
 
       const regions = await detectLayoutFn(
         { data: rp.png.toString('base64'), mime: 'image/png' },
-        { model: LAYOUT_MODEL, abortSignal: job.signal },
+        { model: resolveLayoutModel(), abortSignal: job.signal },
       );
 
       const units = postProcessPage(regions, p, {});
