@@ -17,7 +17,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, readFile, unlink, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, unlink, stat, rmdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -113,7 +113,7 @@ export async function renderPdfPageToPng(opts: {
     // Best-effort cleanup; ignore errors (file may not exist if pdftoppm failed early)
     await unlink(outFile).catch(() => undefined);
     // Remove tmpDir (it's now empty)
-    await import('node:fs/promises').then((m) => m.rmdir(tmpDir)).catch(() => undefined);
+    await rmdir(tmpDir).catch(() => undefined);
   }
 }
 
