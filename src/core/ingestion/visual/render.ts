@@ -23,7 +23,7 @@ import { join } from 'node:path';
 
 const execFileAsync = promisify(execFile);
 
-const PDFTOPPM_BIN = '/usr/bin/pdftoppm';
+export const PDFTOPPM_BIN = '/usr/bin/pdftoppm';
 
 /** Pinned default DPI. See module doc comment for rationale. */
 const DEFAULT_DPI = 200;
@@ -129,7 +129,7 @@ export async function renderPdfPageToPng(opts: {
  *
  * This is dependency-free and requires no external library.
  */
-function readPngIhdrDimensions(buf: Buffer): { width: number; height: number } {
+export function readPngIhdrDimensions(buf: Buffer): { width: number; height: number } {
   if (buf.length < 24) {
     throw new Error('renderPdfPageToPng: PNG output is too small to contain an IHDR chunk');
   }
