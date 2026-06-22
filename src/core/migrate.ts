@@ -5367,6 +5367,90 @@ export const MIGRATIONS: Migration[] = [
       END $$;
     `,
   },
+  {
+    version: 120,
+    name: 'units_table',
+    // PR2 visual-doc-foundation (T004): semantic units table for visually-rich
+    // document retrieval. Each row represents a detected region (table, figure,
+    // chart, text block, caption, or section heading) extracted from a document
+    // page. The embedding column mirrors content_chunks.embedding_multimodal
+    // (vector(1024)) for multimodal search parity.
+    //
+    // document_id references pages(id) ON DELETE CASCADE so units are
+    // automatically removed when the parent page is deleted.
+    //
+    // BIGSERIAL/INTEGER[]/JSONB/vector all work on PGLite (Postgres-in-WASM),
+    // so a single sql: block suffices for both engines.
+    //
+    // The HNSW index ships separately in v121 (requires transaction: false on
+    // Postgres for CREATE INDEX CONCURRENTLY).
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS units (
+        id               BIGSERIAL PRIMARY KEY,
+        document_id      INTEGER     NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+        type             TEXT        NOT NULL CHECK (type IN ('table','figure','chart','text','caption','section')),
+        page_numbers     INTEGER[],
+        bbox             JSONB,
+        reading_order    INTEGER,
+        provenance       JSONB,
+        confidence       REAL,
+        embedding        vector(1024),
+        source_image_ref TEXT,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_units_document_id ON units (document_id);
+      CREATE INDEX IF NOT EXISTS idx_units_type ON units (type);
+      CREATE INDEX IF NOT EXISTS idx_units_reading_order ON units (document_id, reading_order);
+    `,
+  },
+  {
+    version: 121,
+    name: 'units_embedding_hnsw',
+    // PR2 visual-doc-foundation (T005): HNSW index on units.embedding.
+    //
+    // Ships separately from v120 (units_table) because CREATE INDEX CONCURRENTLY
+    // on Postgres requires running outside a transaction (`transaction: false`).
+    // PGLite has no concurrent writers so it uses a plain CREATE INDEX.
+    //
+    // Follows the established CREATE INDEX CONCURRENTLY pre-drop pattern used
+    // throughout MIGRATIONS: Postgres pre-drops any invalid remnant from a prior
+    // failed CONCURRENTLY attempt via pg_index.indisvalid, then creates the index
+    // CONCURRENTLY. PGLite uses a plain CREATE INDEX (no concurrent writers).
+    idempotent: true,
+    transaction: false,
+    sql: '',
+    handler: async (engine) => {
+      if (engine.kind === 'postgres') {
+        await engine.runMigration(
+          121,
+          `DO $$ BEGIN
+             IF EXISTS (
+               SELECT 1 FROM pg_index i
+               JOIN pg_class c ON c.oid = i.indexrelid
+               WHERE c.relname = 'idx_units_embedding_hnsw' AND NOT i.indisvalid
+             ) THEN
+               EXECUTE 'DROP INDEX CONCURRENTLY IF EXISTS idx_units_embedding_hnsw';
+             END IF;
+           END $$;`
+        );
+        await engine.runMigration(
+          121,
+          `CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_units_embedding_hnsw
+             ON units USING hnsw (embedding vector_cosine_ops)
+             WHERE embedding IS NOT NULL;`
+        );
+      } else {
+        await engine.runMigration(
+          121,
+          `CREATE INDEX IF NOT EXISTS idx_units_embedding_hnsw
+             ON units USING hnsw (embedding vector_cosine_ops)
+             WHERE embedding IS NOT NULL;`
+        );
+      }
+    },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

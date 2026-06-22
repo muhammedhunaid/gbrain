@@ -34,7 +34,7 @@ export const voyage: Recipe = {
         'voyage-4-large', 'voyage-4', 'voyage-4-lite', 'voyage-4-nano',
         'voyage-3.5', 'voyage-3-large', 'voyage-3', 'voyage-3-lite',
         'voyage-code-3', 'voyage-finance-2', 'voyage-law-2',
-        'voyage-multimodal-3',
+        'voyage-multimodal-3', 'voyage-multimodal-3.5',
       ],
       default_dims: 1024,
       cost_per_1m_tokens_usd: 0.18,
@@ -55,7 +55,7 @@ export const voyage: Recipe = {
       // through local validation and Voyage would reject it with HTTP 400 —
       // which gateway.ts:626 misclassifies as transient (TODO: reclassify
       // 4xx).
-      multimodal_models: ['voyage-multimodal-3'],
+      multimodal_models: ['voyage-multimodal-3', 'voyage-multimodal-3.5'],
     },
   },
   setup_hint: 'Get an API key at https://dash.voyageai.com/api-keys, then `export VOYAGE_API_KEY=...`',

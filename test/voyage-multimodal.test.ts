@@ -73,6 +73,16 @@ describe('voyage recipe — multimodal registration', () => {
     const voyage = getRecipe('voyage');
     expect(voyage!.touchpoints.embedding!.default_dims).toBe(1024);
   });
+
+  test('voyage-multimodal-3.5 is in the recipe model list', () => {
+    const voyage = getRecipe('voyage');
+    expect(voyage!.touchpoints.embedding!.models).toContain('voyage-multimodal-3.5');
+  });
+
+  test('voyage-multimodal-3.5 is in the multimodal_models allowlist', () => {
+    const voyage = getRecipe('voyage');
+    expect(voyage!.touchpoints.embedding!.multimodal_models).toContain('voyage-multimodal-3.5');
+  });
 });
 
 describe('gateway.embedMultimodal — happy path', () => {
