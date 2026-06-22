@@ -35,6 +35,9 @@ const execFileAsync = promisify(execFile);
 /** Pinned DPI — must match render.ts default (200). */
 const RENDER_DPI = 200;
 
+/** Path to pdfinfo binary (mirrors PDFTOPPM_BIN in render.ts). */
+const PDFINFO_BIN = '/usr/bin/pdfinfo';
+
 /** Vision model passed to detectLayout (undefined = gateway default). */
 const LAYOUT_MODEL: string | undefined = undefined;
 
@@ -65,10 +68,12 @@ export interface VisualIngestDeps {
 /**
  * Get the page count for a PDF using pdfinfo.
  * Falls back to rendering pages one-by-one if pdfinfo is unavailable.
+ * An optional AbortSignal is threaded into the fallback loop so a cancelled
+ * job does not spin through a pathological PDF for minutes.
  */
-async function getPdfPageCount(pdfPath: string): Promise<number> {
+async function getPdfPageCount(pdfPath: string, signal?: AbortSignal): Promise<number> {
   try {
-    const { stdout } = await execFileAsync('/usr/bin/pdfinfo', [pdfPath]);
+    const { stdout } = await execFileAsync(PDFINFO_BIN, [pdfPath]);
     const m = stdout.match(/^Pages:\s*(\d+)/m);
     if (m) return parseInt(m[1], 10);
   } catch {
@@ -78,6 +83,7 @@ async function getPdfPageCount(pdfPath: string): Promise<number> {
   // Render-based fallback: render pages until one fails
   let count = 0;
   for (;;) {
+    if (signal?.aborted) break;
     try {
       await renderPdfPageToPng({ pdfPath, page: count + 1, dpi: RENDER_DPI });
       count++;
@@ -129,9 +135,11 @@ export function makeVisualIngestHandler(
     // ---- Step 3: idempotency check ----------------------------------------------
     const existing = await engine.getPage(slug, { sourceId });
     if (existing) {
-      const existingHash =
-        (existing.frontmatter?.content_hash as string | undefined) ??
-        existing.content_hash;
+      // putPage stores a hash of the page content (title+compiled_truth+frontmatter…)
+      // in pages.content_hash — NOT the PDF file's SHA-256. The PDF hash lives only
+      // in frontmatter.content_hash, so the fallback to existing.content_hash would
+      // never match fileHash and is misleading. Use frontmatter only.
+      const existingHash = existing.frontmatter?.content_hash as string | undefined;
       if (existingHash === fileHash) {
         return { status: 'skipped', slug, reason: 'unchanged' };
       }
@@ -162,7 +170,7 @@ export function makeVisualIngestHandler(
     );
 
     // ---- Step 6: page count -----------------------------------------------------
-    const N = await getPdfPageCount(filePath);
+    const N = await getPdfPageCount(filePath, job.signal);
     if (N === 0) {
       throw new Error(`visual-ingest: ${filePath} has 0 pages`);
     }
@@ -208,8 +216,7 @@ export function makeVisualIngestHandler(
       const firstBbox = unit.bbox[0];
       const dims = pageRenderedDims.get(firstPage);
       if (!dims) {
-        // Should never happen — we populated the map above
-        continue;
+        throw new Error(`visual-ingest: no rendered dims for page ${firstPage} (document_id=${documentId}) — unit would be dropped`);
       }
 
       const crop = await cropUnitFromPdf({
@@ -240,7 +247,7 @@ export function makeVisualIngestHandler(
         engine,
         `INSERT INTO units (document_id, type, page_numbers, reading_order, confidence, source_image_ref, embedding, bbox, provenance)
          VALUES ($1, $2, $3::int[], $4, $5, $6, $7::vector, ($8::jsonb)->'boxes', $9::jsonb)`,
-        [documentId, unit.type, pageNumsLiteral, unit.reading_order, unit.confidence, null, embStr],
+        [documentId, unit.type, pageNumsLiteral, unit.reading_order, unit.confidence, null /* TODO(PR6): persist crop image ref instead of null */, embStr],
         [bboxJson, provenanceJson],
       );
 

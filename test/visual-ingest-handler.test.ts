@@ -187,4 +187,50 @@ describe('makeVisualIngestHandler', () => {
     );
     expect(parseInt(countAfterSecond[0].c, 10)).toBe(firstCount);
   }, 60_000);
+
+  test('rebuild: changed content_hash triggers DELETE+reinsert, no unit accumulation', async () => {
+    const SLUG = 'inbox/visual/test-doc';
+    const handler = makeVisualIngestHandler(engine, {
+      detectLayoutFn: stubDetectLayout as typeof import('../src/core/ai/layout/detect-layout.ts').detectLayout,
+      embedFn: stubEmbed as typeof import('../src/core/ai/gateway.ts').embedMultimodal,
+    });
+
+    // First run — ingest with an explicit slug
+    const job1 = makeMinionJobContext(FIXTURE_PDF);
+    (job1.data as Record<string, unknown>).slug = SLUG;
+    const r1 = await handler(job1) as { status: string; document_id: number; units: number };
+    expect(r1.status).toBe('ok');
+    const N = r1.units;
+    expect(N).toBeGreaterThanOrEqual(1);
+    const documentId = r1.document_id;
+
+    // Simulate changed content: overwrite the stored hash so the next run
+    // sees existingHash !== fileHash and must rebuild.
+    await engine.putPage(SLUG, {
+      type: 'note',
+      title: 'x',
+      compiled_truth: '',
+      timeline: '',
+      frontmatter: { content_hash: 'STALE_DIFFERENT_HASH', source_kind: 'visual_ingest' },
+    }, { sourceId: 'default' });
+
+    // Second run — same file, same slug, stale hash stored → must rebuild
+    const job2 = makeMinionJobContext(FIXTURE_PDF);
+    (job2.data as Record<string, unknown>).slug = SLUG;
+    const r2 = await handler(job2) as { status: string; document_id: number; units: number };
+
+    // Must NOT be skipped — content changed so a rebuild was required
+    expect(r2.status).not.toBe('skipped');
+    expect(r2.status).toBe('ok');
+
+    // document_id must be the same page (same slug = same row)
+    expect(r2.document_id).toBe(documentId);
+
+    // Unit count must equal N (REPLACED, not 2N — proves DELETE ran correctly)
+    const countRows = await engine.executeRaw<{ c: string }>(
+      `SELECT count(*)::text AS c FROM units WHERE document_id = $1`,
+      [documentId],
+    );
+    expect(parseInt(countRows[0].c, 10)).toBe(N);
+  }, 60_000);
 });
