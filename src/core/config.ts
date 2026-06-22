@@ -342,6 +342,21 @@ export interface GBrainConfig {
      */
     skills_dir?: string;
   };
+
+  /**
+   * Visual-document ingest config. File-plane only (read via loadConfig()).
+   * Model IDs live in the file plane like embedding_model — NOT gbrain config set.
+   */
+  visual?: {
+    /** Multimodal embedder for visual units. Default "voyage:voyage-multimodal-3.5". */
+    embedding_model?: string;
+    /** LLM-vision model for layout detection. Default "anthropic:claude-sonnet-4-6". */
+    layout_model?: string;
+    /** Per-document ingest USD budget cap. Default 5. */
+    budget_per_job_usd?: number;
+    /** Daily rolling USD cap across visual ingest. Default 25. */
+    budget_daily_usd?: number;
+  };
 }
 
 /**
@@ -926,6 +941,11 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'embed.backfill_cooldown_min',
   'embed.backfill_max_usd_per_source_24h',
   'embed.backfill_max_usd',
+  // Visual-document ingest (file-plane, T003)
+  'visual.embedding_model',
+  'visual.layout_model',
+  'visual.budget_per_job_usd',
+  'visual.budget_daily_usd',
 ];
 
 /**
@@ -944,6 +964,7 @@ export const KNOWN_CONFIG_KEY_PREFIXES: readonly string[] = [
   'mcp.',               // mcp.publish_skills, mcp.skills_dir (PR1 skill catalog)
   'autopilot.',         // autopilot.nightly_quality_probe.*, autopilot.auto_drain.* (#1685)
   'self_upgrade.',      // v0.42 self-upgrade (mode, quiet_hours, state)
+  'visual.',            // visual-document ingest (file-plane, T003)
 ];
 
 export function saveConfig(config: GBrainConfig): void {
