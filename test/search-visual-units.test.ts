@@ -73,6 +73,135 @@ async function seedUnit(
   return rows[0].id;
 }
 
+// ---------------------------------------------------------------------------
+// T017 rerank stage tests (added in PR4 T017)
+// ---------------------------------------------------------------------------
+
+describe('T017 searchVisualUnits rerank stage', () => {
+  test('rerankFn reorders results and sets rerank_score', async () => {
+    const pageId = await seedPage('test/rerank-order-page');
+    // Seed 3 units with DISTINCT similarity to query so recall order is deterministic.
+    // Query = [0.9, 0.1, 0.0, ...0]. Similarities (approx):
+    //   figure = unitVec(0) → high similarity  (idx 0 in recall)
+    //   table  = mixed vec  → medium similarity (idx 1 in recall)
+    //   chart  = unitVec(5) → zero similarity   (idx 2 in recall)
+    const highVec = unitVec(0);               // similarity ~0.9 with query
+    const midVec = new Float32Array(1024);
+    midVec[0] = 0.5; midVec[1] = 0.5;        // similarity ~0.45 with query
+    const lowVec = unitVec(5);                // similarity ~0.0 with query
+
+    await seedUnit(pageId, 'figure', highVec); // recall idx 0
+    await seedUnit(pageId, 'table',  midVec);  // recall idx 1
+    await seedUnit(pageId, 'chart',  lowVec);  // recall idx 2
+
+    // Query vector aligned with pos 0 (figure closest, chart furthest)
+    const queryVec = new Float32Array(1024);
+    queryVec[0] = 0.9; queryVec[1] = 0.1;
+
+    // rerankFn reverses the order: chart(idx2), figure(idx0), table(idx1)
+    const rerankFn = async (_input: { query: string; documents: string[]; topN?: number }) => [
+      { index: 2, relevanceScore: 0.9 },
+      { index: 0, relevanceScore: 0.7 },
+      { index: 1, relevanceScore: 0.5 },
+    ];
+
+    const results = await searchVisualUnits(engine, {
+      query: 'test rerank',
+      embedFn: async () => queryVec,
+      limit: 3,
+      rerankFn,
+    });
+
+    expect(results.length).toBe(3);
+    // Reranked order: chart, figure, table
+    expect(results[0].type).toBe('chart');
+    expect(results[1].type).toBe('figure');
+    expect(results[2].type).toBe('table');
+    // rerank_score set on each
+    expect(results[0].rerank_score).toBeCloseTo(0.9);
+    expect(results[1].rerank_score).toBeCloseTo(0.7);
+    expect(results[2].rerank_score).toBeCloseTo(0.5);
+  });
+
+  test('over-fetch + truncate: final length == limit after rerank', async () => {
+    const pageId = await seedPage('test/rerank-truncate-page');
+    // Seed 10 units so candidateK (30) clips to however many exist; limit=3
+    for (let i = 0; i < 10; i++) {
+      await seedUnit(pageId, 'text', unitVec(i));
+    }
+
+    // rerankFn returns 5 entries; after truncation to rerankTopN=limit=3 → 3 results
+    const rerankFn = async (input: { query: string; documents: string[]; topN?: number }) => {
+      // Return topN entries (the function is asked for topN, but we simulate returning all topN)
+      const n = input.topN ?? input.documents.length;
+      return Array.from({ length: Math.min(n, input.documents.length) }, (_, i) => ({
+        index: i,
+        relevanceScore: 1 - i * 0.1,
+      }));
+    };
+
+    const results = await searchVisualUnits(engine, {
+      query: 'test truncate',
+      embedFn: async () => unitVec(0),
+      limit: 3,
+      rerankFn,
+    });
+
+    expect(results.length).toBe(3);
+  });
+
+  test('fail-open: rerankFn that throws returns recall order, no throw', async () => {
+    const pageId = await seedPage('test/rerank-failopen-page');
+    await seedUnit(pageId, 'figure', unitVec(0));
+    await seedUnit(pageId, 'table',  unitVec(1));
+    await seedUnit(pageId, 'chart',  unitVec(2));
+
+    const rerankFn = async (_input: { query: string; documents: string[]; topN?: number }): Promise<{ index: number; relevanceScore: number }[]> => {
+      throw new Error('reranker unavailable');
+    };
+
+    // Should not throw; returns top `limit` in recall order
+    const results = await searchVisualUnits(engine, {
+      query: 'test failopen',
+      embedFn: async () => unitVec(0),
+      limit: 2,
+      rerankFn,
+    });
+
+    // No throw, returns recall-ordered top 2
+    expect(results.length).toBe(2);
+    // recall order: figure(pos0) first since query=unitVec(0)
+    expect(results[0].type).toBe('figure');
+    // rerank_score must NOT be set on fail-open
+    expect(results[0].rerank_score).toBeUndefined();
+  });
+
+  test('rerank:false skips reranker, preserves recall order, no rerank_score', async () => {
+    const pageId = await seedPage('test/rerank-off-page');
+    await seedUnit(pageId, 'figure', unitVec(0));
+    await seedUnit(pageId, 'table',  unitVec(1));
+
+    let rerankCalled = false;
+    const rerankFn = async (_input: { query: string; documents: string[]; topN?: number }) => {
+      rerankCalled = true;
+      return [{ index: 0, relevanceScore: 0.99 }];
+    };
+
+    const results = await searchVisualUnits(engine, {
+      query: 'test no rerank',
+      embedFn: async () => unitVec(0),
+      limit: 2,
+      rerank: false,
+      rerankFn,
+    });
+
+    expect(rerankCalled).toBe(false);
+    expect(results.length).toBe(2);
+    expect(results[0].type).toBe('figure'); // recall order
+    expect(results[0].rerank_score).toBeUndefined();
+  });
+});
+
 describe('T016 searchVisualUnits', () => {
   test('ranking: unit closer to query vector ranks first with higher score', async () => {
     const pageId = await seedPage('test/rank-page');

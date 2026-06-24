@@ -5072,18 +5072,20 @@ const ingest_visual_doc: Operation = {
 const search_visual_units: Operation = {
   name: 'search_visual_units',
   description:
-    'Multimodal recall over the units table. Embeds the query via the multimodal gateway and runs a source-scoped vector search over units.embedding. Returns visual units (figures, tables, charts, etc.) ordered by cosine similarity. Requires an embedding-capable gateway.',
+    'Multimodal recall over the units table. Embeds the query via the multimodal gateway and runs a source-scoped vector search over units.embedding. Returns visual units (figures, tables, charts, etc.) ordered by cosine similarity. Optionally applies a cross-encoder rerank pass. Requires an embedding-capable gateway.',
   params: {
     query: { type: 'string', required: true, description: 'Natural-language search query (will be embedded via multimodal gateway).' },
     limit: { type: 'number', description: 'Max results to return (default 10).' },
+    rerank: { type: 'boolean', description: 'Apply cross-encoder rerank pass. Omit for AUTO (on iff reranker configured); true to force on; false to force off. Fail-open: rerank failure never breaks recall.' },
   },
   scope: 'read',
   handler: async (ctx, p) => {
     const query = p.query as string;
     const limit = (p.limit as number) | 0 || 10;
     const sourceScope = sourceScopeOpts(ctx);
+    const rerank = typeof p.rerank === 'boolean' ? p.rerank : undefined;
     const { searchVisualUnits } = await import('./search/visual-units.ts');
-    const results = await searchVisualUnits(ctx.engine, { query, sourceScope, limit });
+    const results = await searchVisualUnits(ctx.engine, { query, sourceScope, limit, rerank });
     return { results };
   },
   cliHints: { name: 'search-visual-units', positional: ['query'] },
