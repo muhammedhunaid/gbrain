@@ -5067,6 +5067,30 @@ const ingest_visual_doc: Operation = {
   },
 };
 
+// --- Visual Unit Search (T016, PR4) ---
+
+const search_visual_units: Operation = {
+  name: 'search_visual_units',
+  description:
+    'Multimodal recall over the units table. Embeds the query via the multimodal gateway and runs a source-scoped vector search over units.embedding. Returns visual units (figures, tables, charts, etc.) ordered by cosine similarity. Optionally applies a cross-encoder rerank pass. Requires an embedding-capable gateway.',
+  params: {
+    query: { type: 'string', required: true, description: 'Natural-language search query (will be embedded via multimodal gateway).' },
+    limit: { type: 'number', description: 'Max results to return (default 10).' },
+    rerank: { type: 'boolean', description: 'Apply cross-encoder rerank pass. Omit for AUTO (on iff reranker configured); true to force on; false to force off. Fail-open: rerank failure never breaks recall.' },
+  },
+  scope: 'read',
+  handler: async (ctx, p) => {
+    const query = p.query as string;
+    const limit = (p.limit as number) | 0 || 10;
+    const sourceScope = sourceScopeOpts(ctx);
+    const rerank = typeof p.rerank === 'boolean' ? p.rerank : undefined;
+    const { searchVisualUnits } = await import('./search/visual-units.ts');
+    const results = await searchVisualUnits(ctx.engine, { query, sourceScope, limit, rerank });
+    return { results };
+  },
+  cliHints: { name: 'search-visual-units', positional: ['query'] },
+};
+
 export const operations: Operation[] = [
   // Page CRUD
   get_page, put_page, delete_page, list_pages,
@@ -5076,6 +5100,8 @@ export const operations: Operation[] = [
   search, query,
   // v0.36 Phase 2: image-as-query
   search_by_image,
+  // PR4 T016: multimodal recall over units table (read-scope, source-scoped)
+  search_visual_units,
   // Tags
   add_tag, remove_tag, get_tags,
   // Links
