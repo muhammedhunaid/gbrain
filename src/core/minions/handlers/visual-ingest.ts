@@ -166,6 +166,7 @@ export function makeVisualIngestHandler(
         frontmatter: {
           content_hash: fileHash,
           source_kind: 'visual_ingest',
+          source_path: filePath,
         },
       },
       { sourceId },
