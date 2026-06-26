@@ -82,6 +82,23 @@ async function seedUnit(
   return rows[0].id;
 }
 
+/** Insert a unit row with a NULL bbox (malformed recall). Returns id. */
+async function seedUnitNullBbox(
+  documentId: number,
+  vec: Float32Array,
+  pageNumbers: number[],
+): Promise<number> {
+  const vecLit = '[' + Array.from(vec).join(',') + ']';
+  const pageNumsLiteral = '{' + pageNumbers.join(',') + '}';
+  const rows = await engine.executeRaw<{ id: number }>(
+    `INSERT INTO units (document_id, type, page_numbers, embedding, bbox, provenance)
+       VALUES ($1, 'table', $2::int[], $3::vector, NULL, $4)
+       RETURNING id`,
+    [documentId, pageNumsLiteral, vecLit, { source: 'pdf' }],
+  );
+  return rows[0].id;
+}
+
 const BOXES = [{ x0: 0.1, y0: 0.1, x1: 0.9, y1: 0.5 }];
 
 // ---- tests --------------------------------------------------------------------
@@ -191,5 +208,70 @@ describe('answerFromVisualUnits (T019 + T020)', () => {
     });
     expect(res2.found).toBe(true);
     expect(res2.answer).toBe('42');
+  });
+
+  test('NOT-FOUND rerank below threshold: low relevanceScore → reason below_threshold, vision NOT called', async () => {
+    const docId = await seedPage('test/answer-rerank-low', { source_path: FIXTURE_PDF });
+    await seedUnit(docId, unitVec(0), BOXES, [1]);
+
+    let visionCalls = 0;
+    const visionFn = async (_opts: unknown) => { visionCalls++; return 'should not happen'; };
+
+    // Strong cosine recall (embedFn matches the unit vector) but the reranker
+    // says it's irrelevant (0.1 < default minRerankScore 0.40) → gate on
+    // rerank_score, not score. No vision spend.
+    const res = await answerFromVisualUnits(engine, {
+      query: 'what is the answer',
+      rerank: true,
+      embedFn: async () => unitVec(0),
+      rerankFn: async () => [{ index: 0, relevanceScore: 0.1 }],
+      visionFn: visionFn as Parameters<typeof answerFromVisualUnits>[1]['visionFn'],
+    });
+
+    expect(res.found).toBe(false);
+    expect(res.reason).toBe('below_threshold');
+    expect(res.rerank_score).toBe(0.1);
+    expect(visionCalls).toBe(0);
+  });
+
+  test('FOUND via rerank: high relevanceScore ≥ threshold → found, vision called once', async () => {
+    const docId = await seedPage('test/answer-rerank-high', { source_path: FIXTURE_PDF });
+    await seedUnit(docId, unitVec(0), BOXES, [1]);
+
+    let visionCalls = 0;
+    const visionFn = async (_opts: unknown) => { visionCalls++; return '42'; };
+
+    const res = await answerFromVisualUnits(engine, {
+      query: 'what is the answer',
+      rerank: true,
+      embedFn: async () => unitVec(0),
+      rerankFn: async () => [{ index: 0, relevanceScore: 0.9 }],
+      visionFn: visionFn as Parameters<typeof answerFromVisualUnits>[1]['visionFn'],
+    });
+
+    expect(res.found).toBe(true);
+    expect(res.answer).toBe('42');
+    expect(res.rerank_score).toBe(0.9);
+    expect(visionCalls).toBe(1);
+  });
+
+  test('NOT-FOUND null bbox: passing recall but bbox NULL → reason no_bbox, vision NOT called', async () => {
+    const docId = await seedPage('test/answer-nobbox', { source_path: FIXTURE_PDF });
+    await seedUnitNullBbox(docId, unitVec(0), [1]);
+
+    let visionCalls = 0;
+    const visionFn = async (_opts: unknown) => { visionCalls++; return 'should not happen'; };
+
+    // Strong cosine recall passes the score gate, but the malformed (NULL) bbox
+    // must short-circuit to not-found BEFORE render/crop — no crash, no vision.
+    const res = await answerFromVisualUnits(engine, {
+      query: 'what is the answer',
+      embedFn: async () => unitVec(0),
+      visionFn: visionFn as Parameters<typeof answerFromVisualUnits>[1]['visionFn'],
+    });
+
+    expect(res.found).toBe(false);
+    expect(res.reason).toBe('no_bbox');
+    expect(visionCalls).toBe(0);
   });
 });

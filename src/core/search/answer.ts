@@ -33,7 +33,7 @@ export interface AnswerResult {
   score: number;
   rerank_score?: number;
   confidence?: number | null;
-  /** 'empty_recall' | 'below_threshold' | 'no_source_path' | 'not_visible' */
+  /** 'empty_recall' | 'below_threshold' | 'no_source_path' | 'no_bbox' | 'not_visible' */
   reason?: string;
 }
 
@@ -107,9 +107,13 @@ export async function answerFromVisualUnits(
     return { found: false, score: top.score, rerank_score: top.rerank_score, reason: 'no_source_path' };
   }
 
-  // 4. Re-crop the unit (DPI MUST match ingest).
+  // 4. Re-crop the unit (DPI MUST match ingest). Defend bbox like page_numbers:
+  // a unit with bbox null/empty is a malformed recall, not a crash → not-found.
   const firstPage = top.page_numbers?.[0] ?? 1;
-  const boxes = top.bbox as { x0: number; y0: number; x1: number; y1: number }[];
+  const boxes = (top.bbox ?? []) as { x0: number; y0: number; x1: number; y1: number }[];
+  if (!boxes[0]) {
+    return { found: false, score: top.score, rerank_score: top.rerank_score, reason: 'no_bbox' };
+  }
   const rp = await renderPdfPageToPng({ pdfPath, page: firstPage, dpi: RENDER_DPI });
   const crop = await cropUnitFromPdf({
     pdfPath,
