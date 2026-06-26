@@ -356,6 +356,10 @@ export interface GBrainConfig {
     budget_per_job_usd?: number;
     /** Daily rolling USD cap across visual ingest. Default 25. */
     budget_daily_usd?: number;
+    /** Min recall cosine to attempt a visual answer. Default 0.25 (applied at call site). */
+    answer_min_score?: number;
+    /** Min rerank score to attempt a visual answer when reranked. Default 0.40 (applied at call site). */
+    answer_min_rerank_score?: number;
   };
 }
 
@@ -946,6 +950,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'visual.layout_model',
   'visual.budget_per_job_usd',
   'visual.budget_daily_usd',
+  'visual.answer_min_score',
+  'visual.answer_min_rerank_score',
 ];
 
 /**

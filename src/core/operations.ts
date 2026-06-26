@@ -5091,6 +5091,34 @@ const search_visual_units: Operation = {
   cliHints: { name: 'search-visual-units', positional: ['query'] },
 };
 
+// --- Visual Document Answer (T019 + T020, PR5) ---
+
+const answer_visual: Operation = {
+  name: 'answer_visual',
+  description:
+    'Answer a question from a visual document: retrieve the top recalled visual unit, re-crop it from the backing PDF, vision-read it, and return the answer WITH provenance — or an explicit not-found (no fabrication) when recall is weak or the value is not visible. Local-only: reads a local PDF path and shells pdftoppm.',
+  params: {
+    query: { type: 'string', required: true, description: 'Natural-language question to answer from the document.' },
+    pdf_path: { type: 'string', description: 'Optional backing-PDF path override (for docs ingested before source_path was stored).' },
+    rerank: { type: 'boolean', description: 'Apply cross-encoder rerank on recall. Omit for AUTO; true to force on; false to force off.' },
+  },
+  scope: 'read',
+  localOnly: true,
+  handler: async (ctx, p) => {
+    const query = p.query as string;
+    const sourceScope = sourceScopeOpts(ctx);
+    const rerank = typeof p.rerank === 'boolean' ? p.rerank : undefined;
+    const { answerFromVisualUnits } = await import('./search/answer.ts');
+    return await answerFromVisualUnits(ctx.engine, {
+      query,
+      sourceScope,
+      pdfPath: p.pdf_path as string | undefined,
+      rerank,
+    });
+  },
+  cliHints: { name: 'answer-visual', positional: ['query'] },
+};
+
 export const operations: Operation[] = [
   // Page CRUD
   get_page, put_page, delete_page, list_pages,
@@ -5102,6 +5130,8 @@ export const operations: Operation[] = [
   search_by_image,
   // PR4 T016: multimodal recall over units table (read-scope, source-scoped)
   search_visual_units,
+  // PR5 T019+T020: visual-document answer path (read-scope, local-only)
+  answer_visual,
   // Tags
   add_tag, remove_tag, get_tags,
   // Links
