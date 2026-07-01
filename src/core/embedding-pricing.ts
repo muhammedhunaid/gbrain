@@ -35,6 +35,14 @@ export const EMBEDDING_PRICING: Record<string, EmbeddingPricing> = {
   'voyage:voyage-3-large':         { pricePerMTok: 0.18 },
   'voyage:voyage-3':               { pricePerMTok: 0.06 },
   'voyage:voyage-4-large':         { pricePerMTok: 0.18 },
+  // Voyage multimodal — the visual-ingest embedder (T022). Voyage does not publish a
+  // separate multimodal token rate distinct from voyage-3-large/voyage-4-large, so we
+  // assume the same $0.18/1M-token rate (text-token equivalent; image pixels are
+  // converted to tokens by Voyage server-side). Without these entries a --max-cost /
+  // visual.budget_per_job_usd-bounded ingest TX2 hard-fails at reserve/record with
+  // no_pricing. Refresh alongside the Voyage pricing cycle if a multimodal rate ships.
+  'voyage:voyage-multimodal-3':    { pricePerMTok: 0.18 },
+  'voyage:voyage-multimodal-3.5':  { pricePerMTok: 0.18 },
   // ZeroEntropy (https://zeroentropy.dev/pricing — zembed-1)
   'zeroentropyai:zembed-1':        { pricePerMTok: 0.05 },
 };
