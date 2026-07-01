@@ -143,4 +143,61 @@ describe('visual-ingest budget + cost reporting + model pinning', () => {
     expect(result.status).toBe('ok');
     expect(result.budgetCapUsd).toBeUndefined();
   }, 60_000);
+
+  test('priced-precheck: unpriced embed model under a cap fails closed BEFORE any work', async () => {
+    // Fail-closed hole: BudgetTracker.record() takes a `record_unpriced` branch on a
+    // pricing MISS that audits but SKIPS the cost math and never throws — so an unpriced
+    // embed under a cap would make the ENTIRE embed spend invisible (silent overspend).
+    // The handler now prechecks the embed model is priced up front and throws otherwise.
+    // We force the resolved embed model to a bogus id via the embedModelOverride DI seam
+    // (loadConfig() returns null in this harness, so the config/env plumbing can't set it).
+    const handler = makeVisualIngestHandler(engine, {
+      detectLayoutFn: stubDetectLayout as typeof import('../src/core/ai/layout/detect-layout.ts').detectLayout,
+      embedFn: stubEmbed as typeof import('../src/core/ai/gateway.ts').embedMultimodal,
+      budgetCapUsd: 1.0,
+      embedModelOverride: 'voyage:does-not-exist',
+    });
+
+    await expect(handler(makeMinionJobContext(FIXTURE_PDF))).rejects.toThrow(/no pricing/i);
+
+    // Fail-closed UP FRONT: no parent page, no units persisted for this file's slug.
+    const rows = await engine.executeRaw<{ c: string }>(
+      `SELECT count(*)::text AS c FROM units`,
+    );
+    expect(parseInt(rows[0].c, 10)).toBe(0);
+  }, 60_000);
+
+  test('holistic cap covers the vision arm: vision spend alone drives budget_exhausted', async () => {
+    // Prove the per-job cap spans BOTH arms (vision chat + embed), not just embed: a
+    // detectLayout stub that records a large vision cost on the ambient BudgetTracker
+    // (the same one embed records against) must blow a tiny cap during the layout phase,
+    // before any embed runs. getCurrentBudgetTracker() is the ambient accessor set by
+    // withBudgetTracker() inside the handler.
+    const { getCurrentBudgetTracker } = await import('../src/core/ai/gateway.ts');
+
+    async function visionCostingDetectLayout(
+      _pageImage: { data: string; mime: string },
+      _opts?: unknown,
+    ): Promise<LayoutRegion[]> {
+      const tracker = getCurrentBudgetTracker();
+      expect(tracker).not.toBeNull();
+      // Big priced vision call: claude-sonnet-4-6 @ $3/1M in → 10M tok ≈ $30 ≫ tiny cap.
+      tracker!.record({ kind: 'chat', modelId: 'anthropic:claude-sonnet-4-6', inputTokens: 10_000_000, outputTokens: 0 });
+      return STUB_REGIONS;
+    }
+
+    const handler = makeVisualIngestHandler(engine, {
+      detectLayoutFn: visionCostingDetectLayout as typeof import('../src/core/ai/layout/detect-layout.ts').detectLayout,
+      embedFn: stubEmbed as typeof import('../src/core/ai/gateway.ts').embedMultimodal,
+      budgetCapUsd: 1e-6,
+    });
+
+    const result = await handler(makeMinionJobContext(FIXTURE_PDF));
+
+    expect(result.status).toBe('budget_exhausted');
+    expect(result.spentUsd as number).toBeGreaterThan(0);
+    expect(result.budgetCapUsd).toBe(1e-6);
+    // Exhausted during the LAYOUT phase, before any unit is embedded/persisted.
+    expect(result.units).toBe(0);
+  }, 60_000);
 });

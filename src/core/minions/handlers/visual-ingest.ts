@@ -30,6 +30,7 @@ import { executeRawJsonb } from '../../sql-query.ts';
 import { detectLayout, PROMPT_VERSION } from '../../ai/layout/detect-layout.ts';
 import { embedMultimodal, getChatModel, withBudgetTracker, DEFAULT_EMBEDDING_MODEL } from '../../ai/gateway.ts';
 import { BudgetTracker, BudgetExhausted } from '../../budget/budget-tracker.ts';
+import { lookupEmbeddingPrice } from '../../embedding-pricing.ts';
 import { loadConfig } from '../../config.ts';
 
 const execFileAsync = promisify(execFile);
@@ -70,16 +71,19 @@ function resolveLayoutModelPinned(): string {
 
 /**
  * Resolve the CONCRETE multimodal embed model id for provenance pinning + budget
- * recording. Mirrors embedMultimodal's fallback chain (embedding_multimodal_model
- * → embedding_model → DEFAULT_EMBEDDING_MODEL) with visual.embedding_model as the
- * intended-but-not-yet-routed override at the front (see the TODO above:
- * embedMultimodal does not read visual.embedding_model yet, so this is the
- * documented target, not necessarily what the endpoint used).
+ * recording. Mirrors embedMultimodal's fallback chain EXACTLY
+ * (embedding_multimodal_model → embedding_model → DEFAULT_EMBEDDING_MODEL) so the
+ * FR-013 embed_model provenance field names the model the endpoint actually used.
+ *
+ * NOTE: `visual.embedding_model` is deliberately NOT in this chain — embedMultimodal
+ * does not read it yet (see the TODO above). Pinning it here would record a model the
+ * endpoint never called (an audit-trail lie). When `visual.embedding_model` routing
+ * lands (deferred), it MUST be added to BOTH embedMultimodal's resolution AND this
+ * pin, together — never one without the other.
  */
 function resolveEmbedModelPinned(): string {
   const cfg = loadConfig();
-  return cfg?.visual?.embedding_model
-    ?? cfg?.embedding_multimodal_model
+  return cfg?.embedding_multimodal_model
     ?? cfg?.embedding_model
     ?? DEFAULT_EMBEDDING_MODEL;
 }
@@ -129,6 +133,15 @@ export interface VisualIngestDeps {
    * file or real API cost. `undefined` = no override (config value / uncapped).
    */
   budgetCapUsd?: number;
+  /**
+   * DI seam (US4): override the concrete embed model id that would otherwise be
+   * resolved from config via `resolveEmbedModelPinned()`. Lets a test force an
+   * unpriced model (e.g. `'voyage:does-not-exist'`) so the fail-closed
+   * priced-embed precheck can be exercised without a config file — `loadConfig()`
+   * returns null in the test harness, so the env/config plumbing can't set it
+   * there. `undefined` = no override (real config resolution).
+   */
+  embedModelOverride?: string;
 }
 
 // ---- page count helper ------------------------------------------------------
@@ -223,7 +236,20 @@ export function makeVisualIngestHandler(
 
     // ---- Model pinning (FR-013): resolve concrete ids ONCE for provenance + record.
     const layoutModel = resolveLayoutModelPinned();
-    const embedModel = resolveEmbedModelPinned();
+    const embedModel = deps.embedModelOverride ?? resolveEmbedModelPinned();
+
+    // ---- Fail-closed precheck (US4): under a cap, an unpriced embed model would make
+    // the ENTIRE embed spend invisible — BudgetTracker.record() takes the
+    // `record_unpriced` branch on a pricing MISS (audits but SKIPS the cumulative-cost
+    // math and never throws), so the per-job cap silently overspends. Mirror reserve()'s
+    // no_pricing hard-fail: verify the embed model is priced BEFORE any ingest work and
+    // throw up front. Uncapped path is unchanged (unpriced-and-uncapped is fine).
+    if (capUsd !== undefined && lookupEmbeddingPrice(embedModel).kind !== 'known') {
+      throw new Error(
+        'visual-ingest: embed model ' + embedModel + ' has no pricing; cannot enforce '
+        + 'budget cap (visual.budget_per_job_usd). Add it to EMBEDDING_PRICING or unset the cap.',
+      );
+    }
 
     // Mutable state readable in the BudgetExhausted catch + success return
     // (partial progress + final counts live outside the tracker closure).
